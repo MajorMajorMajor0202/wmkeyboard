@@ -1041,7 +1041,9 @@ internal fun GroupSkeleton(rowCount: Int, hasTitle: Boolean, modifier: Modifier 
     // and the words' bars move up to where the words will be.
     val tiles = LocalIconReveal.current.present
     val textStart = if (tiles) 72.dp else 16.dp
-    val height = headingLane + SkeletonRowHeight * rowCount + SkeletonRowGap * (rowCount - 1)
+    // Large imported lists must not create a single >262k-pixel constraint.
+    val visibleRows = boundedSkeletonRows(rowCount)
+    val height = headingLane + SkeletonRowHeight * visibleRows + SkeletonRowGap * (visibleRows - 1).coerceAtLeast(0)
     Spacer(
         modifier = modifier
             .fillMaxWidth()
@@ -1061,12 +1063,12 @@ internal fun GroupSkeleton(rowCount: Int, hasTitle: Boolean, modifier: Modifier 
                     val rowHeight = SkeletonRowHeight.toPx()
                     val gap = SkeletonRowGap.toPx()
                     var top = headingLane.toPx()
-                    repeat(rowCount) { index ->
+                    repeat(visibleRows) { index ->
                         // The run's own corners: round on the outside, nearly
                         // square where two rows meet — the same slab shape
                         // [SettingsGroup] builds its cards out of.
                         val first = index == 0
-                        val last = index == rowCount - 1
+                        val last = index == visibleRows - 1
                         drawRoundRect(
                             color = slab,
                             topLeft = Offset(left, top),

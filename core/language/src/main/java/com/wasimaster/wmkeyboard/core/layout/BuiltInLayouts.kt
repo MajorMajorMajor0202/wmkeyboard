@@ -21,6 +21,13 @@ import com.wasimaster.wmkeyboard.core.script.ComposerType
  * inherit the symbol layers and the five numeric keypads, so those grids exist
  * exactly once.
  */
+private val chinesePinyinAlternates=mapOf('q' to listOf("1"),'w' to listOf("2"),'e' to listOf("3"),'r' to listOf("4"),
+        't' to listOf("5"),'y' to listOf("6"),'u' to listOf("7"),'i' to listOf("8"),'o' to listOf("9"),'p' to listOf("0"),
+        'a' to listOf("@"),'s' to listOf("#"),'d' to listOf("¥","$"),'f' to listOf("%"),
+        'g' to listOf("&"),'h' to listOf("-"),'j' to listOf("+"),'k' to listOf("（"),'l' to listOf("）"),
+        'z' to listOf("*"),'x' to listOf("“","”","\""),'c' to listOf("'","‘","’"),'v' to listOf("："),
+        'b' to listOf("；"),'n' to listOf("！"),'m' to listOf("？"))
+
 object BuiltInLayouts {
 
     const val QWERTY_ID = "builtin_qwerty"
@@ -62,6 +69,8 @@ object BuiltInLayouts {
     const val TIBETAN_WYLIE_ID = "builtin_tibetan_wylie"
     const val T9_ID = "builtin_t9"
     const val COMPACT_ID = "builtin_compact"
+    const val COMPACT_PINYIN_ID = "builtin_compact_pinyin"
+    const val PINYIN_13_ID = "builtin_pinyin_13"
 
     const val DEFAULT_ID = QWERTY_ID
 
@@ -504,6 +513,36 @@ object BuiltInLayouts {
         tabletExpand = false,
     )
 
+    /** The same fourteen letter groups, with ordinary QWERTY row and function-key geometry. */
+    val COMPACT_PINYIN = COMPACT.copy(
+        id = COMPACT_PINYIN_ID,
+        name = "中文 十四键拼音 (Chinese 14-Key Pinyin)",
+        langId = "zh",
+        composer = ComposerType.PINYIN,
+        layers = mapOf(LayoutLayer.LETTERS.key to LayerSpec(compactPinyinRows)),
+    )
+
+    val PINYIN_13 = COMPACT_PINYIN.copy(
+        id = PINYIN_13_ID,
+        name = "中文 十三键拼音 (Chinese 13-Key Pinyin)",
+        layers = mapOf(LayoutLayer.LETTERS.key to LayerSpec(pinyin13Rows)),
+    )
+
+    /** Select a fourteen-key geometry without changing its layout identity. */
+    fun compactPinyinVariant(spec: LayoutSpec, compactStyle: Boolean): LayoutSpec {
+        if (spec.id != COMPACT_PINYIN_ID) return spec
+        val rows = if(compactStyle) compactRows.mapIndexed { index,row ->
+            if(index==3) chinesePinyinBottomRow(0.5f) else row.map(::chinesePinyinLetterKey)
+        } else spec.layers[LayoutLayer.LETTERS.key]?.rows ?: compactPinyinRows
+        val chinese=rows.map { row -> row.map { key -> when {
+            key.role==KeyRole.Comma && (key.output ?: key.label)=="," -> chinesePinyinBottomRow().first { it.role==KeyRole.Comma }.copy(width=key.width)
+            key.role==KeyRole.Period && (key.output ?: key.label)=="." -> chinesePinyinBottomRow().first { it.role==KeyRole.Period }.copy(width=key.width)
+            else -> chinesePinyinLetterKey(key)
+        } } }
+        val sized = chinese
+        return spec.copy(layers=spec.layers + (LayoutLayer.LETTERS.key to (spec.layers[LayoutLayer.LETTERS.key]?.copy(rows=sized) ?: LayerSpec(sized))))
+    }
+
     /**
      * Every compiled-in layout, in shipped order — even where two share a grid
      * (AZERTY and French are the same keys under different languages). This is
@@ -515,7 +554,7 @@ object BuiltInLayouts {
         FRENCH, GERMAN, SPANISH, KOREAN, RUSSIAN, ARABIC, GREEK, HEBREW, HINDI, HINDI_PHONETIC,
         URDU_PHONETIC, MARATHI_PHONETIC, GUJARATI_PHONETIC, PUNJABI_PHONETIC, ODIA_PHONETIC,
         ASSAMESE_PHONETIC, TAMIL_PHONETIC, TELUGU_PHONETIC, KANNADA_PHONETIC, MALAYALAM_PHONETIC,
-        PERSIAN_PHONETIC, ARABIC_PHONETIC, GREEK_PHONETIC, TIBETAN_WYLIE, T9, COMPACT,
+        PERSIAN_PHONETIC, ARABIC_PHONETIC, GREEK_PHONETIC, TIBETAN_WYLIE, T9, COMPACT, COMPACT_PINYIN, PINYIN_13,
     )
 
     fun byId(id: String): LayoutSpec? = all.firstOrNull { it.id == id }
@@ -1568,3 +1607,42 @@ private val compactRows = listOf(
     ),
     bottomRow(scale = 0.5f),
 )
+
+/** QWERTY geometry with neighbouring letter cells joined, including the singleton L/M cells. */
+private val compactPinyinRows = compactRows.mapIndexed { rowIndex,row ->
+    if(rowIndex==3) chinesePinyinBottomRow() else row.map { key -> chinesePinyinLetterKey(key).copy(width=when {
+        key.action==KeyAction.Shift || key.action==KeyAction.Delete -> 1.5f
+        key.letters!=null -> 2f
+        else -> 1f
+    }) }
+}
+
+private fun chinesePinyinBottomRow(scale: Float=1f) = bottomRow(scale=scale).map { key -> when(key.role) {
+    KeyRole.Comma -> key.copy(label="，",output=null,longPress=listOf("！","？","、","“","”","「","」","《","》",","))
+    KeyRole.Period -> key.copy(label="。",output=null,longPress=listOf("…","：","；","."))
+    else -> key
+} }
+
+private fun chinesePinyinLetterKey(key: Key): Key {
+    val letters=key.letters ?: key.output?.takeIf { it.length==1 && it[0].isLetter() } ?: return key
+    val holds=letters.flatMap { chinesePinyinAlternates[it].orEmpty() }
+    return key.copy(hint=holds.take(2).joinToString("").ifEmpty { null },
+        longPress=if(key.letters!=null) letters.map { it.toString() }+holds else holds)
+}
+
+/** Letter pairing only follows the reference; tools and bottom row remain the Chinese grid's. */
+private val pinyin13Rows = listOf(
+    listOf("qw","er","ty","ui","op").map { pinyin13Key(it,2f) },
+    listOf("as","df","gh","jk","lm").map { pinyin13Key(it,2f) },
+    listOf(Key("⇧",action=KeyAction.Shift,width=2f)) +
+        listOf("zx","cv","bn").map { pinyin13Key(it,2f) } +
+        Key("⌫",action=KeyAction.Delete,width=2f),
+    chinesePinyinBottomRow(),
+)
+
+private fun pinyin13Key(group: String,width: Float): Key = chinesePinyinLetterKey(ambiguousKey(group)).copy(width=width)
+
+
+
+/** Single-letter ownership used by the paired Chinese hold popup. */
+fun pinyinLetterAlternates(letter: Char): List<String> = chinesePinyinAlternates[letter.lowercaseChar()].orEmpty()

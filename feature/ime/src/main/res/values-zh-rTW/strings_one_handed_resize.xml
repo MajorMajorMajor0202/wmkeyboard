@@ -1,0 +1,5 @@
+<resources>
+    <string name="ime_one_handed_resize_desc">調整鍵盤大小和位置</string>
+    <string name="ime_resize_one_handed_move_desc">拖動以移動鍵盤</string>
+    <string name="ime_resize_match_normal_height">與一般鍵盤等高</string>
+</resources>

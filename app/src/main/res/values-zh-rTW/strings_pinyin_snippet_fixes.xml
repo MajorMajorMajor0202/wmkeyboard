@@ -1,0 +1,7 @@
+<resources>
+    <string name="languages_cjk_double_pinyin_delete_title">雙拼按音節退格</string>
+    <string name="languages_cjk_double_pinyin_delete_subtitle">輸入雙拼時，一次刪除一組拼音；未完成的單個按鍵單獨刪除。適用於一般雙拼和十四鍵雙拼。</string>
+    <string name="expander_page_previous">上一頁</string>
+    <string name="expander_page_next">下一頁</string>
+    <string name="expander_page_number">第 %1$d / %2$d 頁</string>
+</resources>

@@ -11,6 +11,25 @@ package com.wasimaster.wmkeyboard.core.input.composer
  * disambiguates and makes the scheme tables forgiving of small mistakes.
  */
 object DoublePinyin {
+    internal fun fuzzyGraph(buffer: String,table: Table,inventory: Set<String>): Lattice.Graph {
+        val units=segments(buffer,table,inventory)
+        val boundaries=IntArray(units.size+1)
+        for(i in units.indices) boundaries[i+1]=boundaries[i]+units[i].inputLen
+        val options=units.map { PinyinFuzzy.costed(it.syllable,inventory) }
+        return Lattice.graph(Lattice.Input(boundaries,
+            Array(options.size) { i -> options[i].map { it.first }.toTypedArray() },
+            Array(options.size) { i -> options[i].map { it.second }.toDoubleArray() }))
+    }
+
+    /** Delete the last complete pair, or a dangling first key, including its separator. */
+    fun backspaceSyllable(buffer: String): String {
+        val text = buffer.trimEnd('\'')
+        if (text.isEmpty()) return ""
+        val start = text.lastIndexOf('\'') + 1
+        val remove = if ((text.length - start) % 2 == 0) 2 else 1
+        return text.dropLast(remove).trimEnd('\'')
+    }
+
 
     /**
      * A scheme's key maps: first-key → initial, and final-key → candidate finals.
@@ -45,8 +64,17 @@ object DoublePinyin {
      * scheme from [CjkConfig.customDoublePinyin], null while that is empty, so
      * typing falls back to full Pinyin rather than to some other scheme.
      */
-    fun tableFor(scheme: DoublePinyinScheme): Table? =
-        if (scheme == DoublePinyinScheme.CUSTOM) CjkConfig.customDoublePinyinTable else TABLES[scheme]
+    fun tableFor(scheme: DoublePinyinScheme): Table? {
+        val table = if (scheme == DoublePinyinScheme.CUSTOM) CjkConfig.customDoublePinyinTable else TABLES[scheme]
+        if (table == null || !CjkConfig.doublePinyinLiteralFinals) return table
+        literalCache?.let { if (it.first === table) return it.second }
+        // Explicit aliases win over the scheme, while its original codes still work.
+        return table.copy(codes = table.codes + mapOf("an" to "an", "en" to "en")).also {
+            literalCache = table to it
+        }
+    }
+
+    @Volatile private var literalCache: Pair<Table, Table>? = null
 
     /**
      * The syllables of a Double Pinyin key [buffer], each spanning exactly two
@@ -96,6 +124,20 @@ object DoublePinyin {
     /** The table and inventory [keysCache] was read from, and what they gave. */
     @Volatile
     private var keysCache: Triple<Table, Set<String>, Map<String, String>>? = null
+
+    @Volatile private var codesCache: Triple<Table, Set<String>, List<String>>? = null
+
+    /** All valid pairs, including aliases; the inverse spelling map only keeps one per syllable. */
+    fun codesOf(table: Table, valid: Set<String>): List<String> {
+        codesCache?.let { if (it.first === table && it.second === valid) return it.third }
+        val codes = buildList {
+            for (a in 'a'..'z') for (b in 'a'..'z') {
+                if (syllableFor(a, b, table, valid) in valid) add("$a$b")
+            }
+        }
+        codesCache = Triple(table, valid, codes)
+        return codes
+    }
 
     /** Each syllable of [valid] and the two keys that type it under [table]. */
     fun keysOf(table: Table, valid: Set<String>): Map<String, String> {

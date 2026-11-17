@@ -871,6 +871,8 @@ private fun latinFirstIds(
     return (latinId to scriptFontId).takeIf { latinId != scriptFontId }
 }
 
+internal val LocalThinLatinKeyLabels = staticCompositionLocalOf { false }
+
 internal val LocalScriptLabelFont = staticCompositionLocalOf<(ScriptId) -> FontFamily?> { { null } }
 
 /**
@@ -1967,6 +1969,7 @@ fun KeyboardThemeProvider(
         typography = remember(boardFontFamily) { typographyWith(boardFontFamily) },
     ) {
         CompositionLocalProvider(
+            LocalThinLatinKeyLabels provides (scriptId==ScriptId.LATIN),
             LocalKbTheme provides kb,
             LocalKeyTextures provides rememberKeyTextures(kb),
             // The glass backdrop, filled by the board once it knows its image

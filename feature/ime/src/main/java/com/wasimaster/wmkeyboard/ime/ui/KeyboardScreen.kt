@@ -87,6 +87,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -492,6 +493,9 @@ import com.wasimaster.wmkeyboard.core.settings.MeteredDecision
 import com.wasimaster.wmkeyboard.core.settings.MeteredFeature
 import com.wasimaster.wmkeyboard.core.settings.NoKeyboardModeId
 import com.wasimaster.wmkeyboard.core.transliteration.BengaliGraphemes
+import com.wasimaster.wmkeyboard.core.settings.bounds
+import com.wasimaster.wmkeyboard.core.icons.symbols.outlined.OpenWith
+import com.wasimaster.wmkeyboard.core.settings.withProfile
 import com.wasimaster.wmkeyboard.core.settings.OneHandedMode
 import com.wasimaster.wmkeyboard.core.settings.AlternateGroup
 import com.wasimaster.wmkeyboard.core.settings.DefaultAlternatesOrder
@@ -1973,7 +1977,7 @@ internal val LocalLiveUiState = staticCompositionLocalOf<State<KeyboardUiState>?
  * clear.
  */
 internal fun KeyboardUiState.withoutTypingFields(): KeyboardUiState =
-    if (suggestions.isEmpty() && emojiSuggestions.isEmpty() && composingPreview.isEmpty() &&
+    if (pinyinGlidePreview==null && suggestions.isEmpty() && emojiSuggestions.isEmpty() && composingPreview.isEmpty() &&
         nextLetterBias.isEmpty() && autocorrectWord == null && newWords.isEmpty() &&
         stripTyped == null && sentenceOpeners.isEmpty() && punctuationSuggestions.isEmpty() &&
         phoneticCandidates.isEmpty() && octopus.isEmpty() && octopusGlide.isEmpty()
@@ -1981,6 +1985,7 @@ internal fun KeyboardUiState.withoutTypingFields(): KeyboardUiState =
         this
     } else {
         copy(
+            pinyinGlidePreview = null,
             suggestions = emptyList(),
             emojiSuggestions = emptyList(),
             composingPreview = "",
@@ -2207,7 +2212,11 @@ private fun KeyboardScreenFrame(
         rawState.settings.sizingOverrides[variant]?.keyboardScale ?: 1f
     }
     val shown = remember(settings, preview, previewScale) {
-        if (preview == null) settings else settings.withResizePreview(preview, previewScale)
+        val profile = settings.oneHanded.forLandscape(variant.isLandscape)
+        val base = if (settings.oneHandedModeFor(variant.isLandscape) != OneHandedMode.OFF && profile.bottomPaddingDp != null) {
+            settings.copy(bottomPaddingDp = profile.bottomPaddingDp)
+        } else settings
+        if (preview == null) base else base.withResizePreview(preview, previewScale, variant.isLandscape)
     }
     val state = remember(rawState, shown) { rawState.withSettings(shown) }
     val autoBottomPadding = autoBottomPaddingDp(gestureBarAtBottom())
@@ -2215,6 +2224,9 @@ private fun KeyboardScreenFrame(
         remember(rawState.settings, variant, resizePreview, autoBottomPadding) {
             val values = rawState.settings.sizingValuesFor(variant)
             val scale = values.keyboardScale ?: 1f
+            val oneHandedMode = settings.oneHandedModeFor(variant.isLandscape)
+            val oneHandedProfile = settings.oneHanded.forLandscape(variant.isLandscape)
+            val oneHanded = oneHandedMode != OneHandedMode.OFF
             val entry = ResizeValues(
                 keyHeightDp = values.keyHeightDp ?: rawState.settings.keyHeightDp,
                 numberRowHeightDp = values.numberRowHeightDp
@@ -2230,7 +2242,17 @@ private fun KeyboardScreenFrame(
                 // The height the bar is drawn at, theme and screen shape folded
                 // in, so the first drag starts from what is on screen (#1261).
                 toolbarHeightDp = settings.toolbarHeightDp,
-            )
+            ).let { value ->
+                if (!oneHanded) value else {
+                    val bounds = oneHandedProfile.bounds(oneHandedMode)
+                    value.copy(
+                        keyHeightDp = (value.keyHeightDp * oneHandedProfile.heightScale / 100f).roundToInt(),
+                        numberRowHeightDp = (value.numberRowHeightDp * oneHandedProfile.heightScale / 100f).roundToInt(),
+                        bottomPaddingDp = oneHandedProfile.bottomPaddingDp ?: value.bottomPaddingDp,
+                        sidePadLeft = bounds.left, sidePadRight = bounds.right,
+                    )
+                }
+            }
             // How much taller the keyboard could get from here: the frame
             // reserves this on entry so nothing under the finger moves during
             // a drag (see ResizeSession.headroomDp).
@@ -2245,8 +2267,10 @@ private fun KeyboardScreenFrame(
                 ).value
             }
             val tallest = entry.copy(
-                keyHeightDp = SettingsRepository.KEY_HEIGHT_MAX_DP,
-                numberRowHeightDp = SettingsRepository.KEY_HEIGHT_MAX_DP,
+                keyHeightDp = if (oneHanded) oneHandedHeightRange(entry.keyHeightDp, oneHandedProfile.heightScale).last
+                    else SettingsRepository.KEY_HEIGHT_MAX_DP,
+                numberRowHeightDp = if (oneHanded) oneHandedHeightRange(entry.numberRowHeightDp, oneHandedProfile.heightScale).last
+                    else SettingsRepository.KEY_HEIGHT_MAX_DP,
             )
             // Two bar rows when the tools have one of their own (#1261), and
             // one more for the second toolbar (#1217), which is a toolbar's
@@ -2275,12 +2299,21 @@ private fun KeyboardScreenFrame(
                 headroomDp = headroomDp,
                 preview = resizePreview,
                 onCommit = { result ->
-                    onSizingAction(resizeCommitAction(variant, entry, result))
+                    onSizingAction(if (oneHanded) oneHandedResizeCommit(variant, entry, result, oneHandedProfile)
+                        else resizeCommitAction(variant, entry, result))
                 },
                 // A theme's own toolbar height wins over the portrait value,
                 // so a drag there would be stored and never seen.
                 toolbarResizable = activeSpec?.toolbarHeightDp == null || variant.isOverride,
                 barRows = barRows,
+                oneHanded = oneHanded,
+                onMatchNormalHeight = if (oneHanded) ({
+                    onSizingAction(oneHandedMatchNormalHeight(variant, entry, resizePreview.value, oneHandedProfile))
+                }) else null,
+                keyHeightRange = if (oneHanded) oneHandedHeightRange(entry.keyHeightDp, oneHandedProfile.heightScale)
+                    else SettingsRepository.KEY_HEIGHT_MIN_DP..SettingsRepository.KEY_HEIGHT_MAX_DP,
+                numberHeightRange = if (oneHanded) oneHandedHeightRange(entry.numberRowHeightDp, oneHandedProfile.heightScale)
+                    else SettingsRepository.KEY_HEIGHT_MIN_DP..SettingsRepository.KEY_HEIGHT_MAX_DP,
             )
         }
     }
@@ -2409,6 +2442,7 @@ private fun KeyboardScreenFrame(
                                 configuration.orientation == Configuration.ORIENTATION_LANDSCAPE,
                             onOneHanded = onOneHanded,
                             onOneHandedSide = onOneHandedSide,
+                            onResize = { onToolTap(ToolbarTool.RESIZE) },
                             resize = resizeSession,
                             keyPreview = keyPreview,
                             keyGridFocus = panelFocus.keyGrid,
@@ -2453,6 +2487,7 @@ private fun DockedKeyboardFrame(
     onOneHanded: (OneHandedMode) -> Unit,
     onOneHandedSide: (Boolean, OneHandedSide) -> Unit,
     resize: ResizeSession? = null,
+    onResize: () -> Unit,
     keyPreview: KeyPreviewState,
     /** Where a television remote is pointing, drawn over the whole frame. */
     keyGridFocus: KeyGridFocus,
@@ -2686,10 +2721,10 @@ private fun DockedKeyboardFrame(
                 // settles. Measured as the body's centre, a share of the row.
                 val alignment = state.fieldAlignment ?: state.settings.keyboardAlignment
                 val bodyCenter =
-                    dockedBodyCenter(state.settings, alignment, oneHanded, ohProfile.widthPercent)
+                    if (oneHanded == OneHandedMode.OFF) dockedBodyCenter(state.settings, alignment, oneHanded, ohProfile.widthPercent)
+                    else ohProfile.bounds(oneHanded).let { it.left + it.width / 2f }
                 val lastBodyCenter = remember { floatArrayOf(Float.NaN) }
-                // Not into resize mode, which leaves one-handed mode on its way in:
-                // its outline is drawn at the settled arrangement and holds still.
+                // Resize previews track the finger directly, without a side-change animation.
                 val slide = remember(oneHanded) {
                     val from = lastBodyCenter[0]
                     val still = from.isNaN() || state.settings.reduceMotion || resize != null
@@ -2782,45 +2817,35 @@ private fun DockedKeyboardFrame(
                             Spacer(modifier = Modifier.weight(arrangement.rightSlack))
                         }
                     } else {
-                        // One-handed: dock to the live side with this orientation's
-                        // width and height scale. The weights sum to 1 so the body
-                        // is exactly `widthFraction` of the screen and any leftover
-                        // beyond the rail becomes centre-ward slack.
-                        val widthFraction = oneHandedWidthFraction(ohProfile.widthPercent)
-                        val leftover = 1f - widthFraction
-                        val railWeight = ONE_HANDED_RAIL_WEIGHT.coerceAtMost(leftover)
-                        val slack = (leftover - railWeight).coerceAtLeast(0f)
-                        val ohState = if (ohProfile.heightScale >= 100) {
-                            state
-                        } else {
-                            state.withKeyHeights(
-                                (state.settings.keyHeightDp * ohProfile.heightScale / 100).coerceAtLeast(1),
-                                (state.settings.numberRowHeightDp * ohProfile.heightScale / 100).coerceAtLeast(1),
-                            )
-                        }
+                        // The body and resize outline share absolute bounds; the rail fits
+                        // into existing slack instead of claiming extra space beside it.
+                        val bounds = ohProfile.bounds(oneHanded)
+                        val ohState = if (ohProfile.heightScale == 100) state else state.withKeyHeights(
+                            (state.settings.keyHeightDp * ohProfile.heightScale / 100f).roundToInt().coerceAtLeast(1),
+                            (state.settings.numberRowHeightDp * ohProfile.heightScale / 100f).roundToInt().coerceAtLeast(1),
+                        )
+                        val railOnLeft = bounds.left >= bounds.right
+                        val railWeight = if (resize != null) 0f else ONE_HANDED_RAIL_WEIGHT
+                            .coerceAtMost(if (railOnLeft) bounds.left else bounds.right)
                         val rail = @Composable {
-                            OneHandedRail(
-                                current = oneHanded,
-                                onFlip = flipSide,
+                            if (railWeight > 0.001f) OneHandedRail(
+                                current = oneHanded, onFlip = flipSide,
                                 onExit = { onOneHanded(OneHandedMode.OFF) },
+                                onResize = onResize,
                                 modifier = Modifier.weight(railWeight),
                             )
                         }
-                        if (oneHanded == OneHandedMode.RIGHT) {
-                            if (slack > 0.001f) Spacer(modifier = Modifier.weight(slack))
-                            rail()
-                            Column(modifier = Modifier.weight(widthFraction)) { revealingBody(ohState) }
-                        } else {
-                            Column(modifier = Modifier.weight(widthFraction)) { revealingBody(ohState) }
-                            rail()
-                            if (slack > 0.001f) Spacer(modifier = Modifier.weight(slack))
-                        }
+                        val left = bounds.left - if (railOnLeft) railWeight else 0f
+                        val right = bounds.right - if (!railOnLeft) railWeight else 0f
+                        if (left > 0.001f) Spacer(modifier = Modifier.weight(left))
+                        if (railOnLeft) rail()
+                        Column(modifier = Modifier.weight(bounds.width)) { revealingBody(ohState) }
+                        if (!railOnLeft) rail()
+                        if (right > 0.001f) Spacer(modifier = Modifier.weight(right))
                     }
                 }
                 // Last in the keyboard box, so the chrome floats over the dimmed
-                // keyboard. The service turns one-handed mode off before entering the
-                // resize mode, so the overlay only ever mirrors the plain docked
-                // arrangement.
+                // keyboard, using the same full-width or one-handed bounds as its body.
                 if (resize != null) ResizeOverlay(session = resize, state = state)
             }
         }
@@ -3195,7 +3220,7 @@ private val TelevisionCardElevation = 12.dp
 private const val FloatingAppearMs = 160
 
 /** The share of the row a one-handed board takes, from its width setting. */
-private fun oneHandedWidthFraction(widthPercent: Int): Float = (widthPercent / 100f).coerceIn(0.30f, 0.90f)
+private fun oneHandedWidthFraction(widthPercent: Int): Float = (widthPercent / 100f).coerceIn(0.30f, 0.95f)
 
 /**
  * Where the docked keyboard body's centre sits, as a share of the row from its
@@ -3771,6 +3796,7 @@ private fun OneHandedRail(
     current: OneHandedMode,
     onFlip: () -> Unit,
     onExit: () -> Unit,
+    onResize: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // The rail already followed the theme, through the Material scheme the
@@ -3804,6 +3830,13 @@ private fun OneHandedRail(
                     contentDescription = stringResource(R.string.ime_one_handed_exit_desc),
                     tint = kb.oneHandedPanelIcon,
                 )
+            }
+        }
+        IconHint(stringResource(R.string.ime_one_handed_resize_desc)) {
+            IconButton(onClick = onResize) {
+                Icon(Icons.Outlined.OpenWith,
+                    contentDescription = stringResource(R.string.ime_one_handed_resize_desc),
+                    tint = kb.oneHandedPanelIcon)
             }
         }
     }
@@ -7157,19 +7190,6 @@ private fun RowScope.CandidateStrip(
         menuFor = -1
         listState.requestScrollToItem(highlighted.takeIf { it in candidates.indices } ?: 0)
     }
-    val held = candidates.getOrNull(menuFor)
-    if (held != null) {
-        CandidateMenu(
-            candidate = held,
-            textScale = textScale,
-            onPick = { adjustment ->
-                onAdjust(held, menuFor, adjustment)
-                menuFor = -1
-            },
-            onDismiss = { menuFor = -1 },
-        )
-        return
-    }
     // Stepping past the right edge has to bring the highlight with it, or the
     // candidate Enter is about to type is one nobody can see.
     ScrollFocusIntoView(highlighted.takeIf { it >= 0 && it < candidates.size }) {
@@ -7195,55 +7215,97 @@ private fun RowScope.CandidateStrip(
             color = MaterialTheme.colorScheme.outlineVariant,
         )
     }
-    LazyRow(
-        state = listState,
-        modifier = Modifier
-            .weight(1f)
-            .fillMaxHeight()
-            .graphicsLayer { this.alpha = alpha() },
-        horizontalArrangement = Arrangement.Start,
-        verticalAlignment = Alignment.CenterVertically,
+    BoxWithConstraints(
+        modifier = Modifier.weight(1f).fillMaxHeight(),
     ) {
-        itemsIndexed(candidates, key = { index, text -> "$index\u0000$text" }) { index, suggestion ->
-            if (index > 0) {
-                VerticalDivider(
-                    modifier = Modifier.height(20.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .widthIn(min = CandidateChipMinWidth)
-                    .fillMaxHeight()
-                    .padding(vertical = if (index == highlighted) 6.dp else 0.dp)
-                    .focusRing(index == highlighted, RoundedCornerShape(10.dp))
-                    // By position, not text: the composer works out how much of
-                    // the buffer to eat from where the chip sat.
-                    .combinedClickable(
-                        enabled = enabled,
-                        onLongClick = if (adjustable) {
-                            { menuFor = index }
-                        } else {
-                            null
+        // LazyRow measures its items with unbounded width. Bound each chip to
+        // the actual viewport so a sentence cannot push every alternative out
+        // of view. Short words keep their natural width.
+        val chipMaxWidth = (maxWidth * 0.6f).coerceAtLeast(CandidateChipMinWidth)
+        val measurer = rememberTextMeasurer()
+        val density = LocalDensity.current
+        val baseStyle = LocalTextStyle.current
+        val textWidthPx = with(density) { (chipMaxWidth - 20.dp).toPx() }.coerceAtLeast(1f)
+        LazyRow(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer { this.alpha = alpha() },
+            horizontalArrangement = Arrangement.Start,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            itemsIndexed(candidates, key = { index, text -> "$index\u0000$text" }) { index, suggestion ->
+                if (index > 0) {
+                    VerticalDivider(
+                        modifier = Modifier.height(20.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .widthIn(min = CandidateChipMinWidth, max = chipMaxWidth)
+                        .fillMaxHeight()
+                        .padding(vertical = if (index == highlighted) 2.dp else 0.dp)
+                        .focusRing(index == highlighted, RoundedCornerShape(10.dp))
+                        // By position, not text: the composer works out how much of
+                        // the buffer to eat from where the chip sat.
+                        .combinedClickable(
+                            enabled = enabled,
+                            onLongClick = if (adjustable) {
+                                { menuFor = index }
+                            } else {
+                                null
+                            },
+                        ) { onCandidate(suggestion, index) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val weight = if (index == highlighted.coerceAtLeast(0)) FontWeight.SemiBold else FontWeight.Normal
+                    val style = baseStyle.merge(TextStyle(
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = CandidateFontSize * textScale,
+                        fontWeight = weight,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 1.05.em,
+                    ))
+                    val scaleX = remember(suggestion, style, textWidthPx) {
+                        // Measure at the requested font size. Only squeeze the
+                        // glyphs horizontally; font size and line height stay fixed.
+                        val measured = measurer.measure(
+                            text = suggestion,
+                            style = style,
+                            maxLines = 2,
+                            constraints = Constraints(maxWidth = textWidthPx.toInt().coerceAtLeast(1)),
+                        )
+                        if (!measured.hasVisualOverflow) 1f else {
+                            val naturalWidth = measurer.measure(
+                                text = suggestion, style = style, softWrap = false, maxLines = 1,
+                            ).size.width.coerceAtLeast(1)
+                            // Leave a little room for whole glyphs at the line break.
+                            (textWidthPx * 2f * 0.95f / naturalWidth).coerceIn(0.7f, 1f)
+                        }
+                    }
+                    BasicText(
+                        text = suggestion,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+                        style = style.merge(TextStyle(
+                            textGeometricTransform = TextGeometricTransform(scaleX = scaleX),
+                        )),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    CandidatePopupMenu(
+                        candidate = suggestion,
+                        expanded = menuFor == index,
+                        onDismiss = { menuFor = -1 },
+                        onPick = { adjustment ->
+                            menuFor = -1
+                            onAdjust(suggestion, index, adjustment)
                         },
-                    ) { onCandidate(suggestion, index) },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = suggestion,
-                    modifier = Modifier.padding(horizontal = 10.dp),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = CandidateFontSize * textScale,
-                    // Bold is "what the space bar commits", which is the
-                    // highlight once there is one.
-                    fontWeight = if (index == highlighted.coerceAtLeast(0)) FontWeight.SemiBold else FontWeight.Normal,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                val hint = hints?.label(HintSurface.SUGGESTION, index)
-                if (hint != null) {
-                    HintBadge(hint, modifier = Modifier.align(Alignment.BottomCenter))
+                    )
+                    val hint = hints?.label(HintSurface.SUGGESTION, index)
+                    if (hint != null) {
+                        HintBadge(hint, modifier = Modifier.align(Alignment.BottomCenter))
+                    }
                 }
             }
         }
@@ -7274,6 +7336,82 @@ private fun RowScope.CandidateStrip(
 private fun CandidateGridPanel(
     state: KeyboardUiState,
     onCandidate: (String, Int) -> Unit,
+    onAdjust: (String, Int, CandidateAdjustment) -> Unit,
+    onKey: (Key) -> Unit,
+) {
+    val readingFeedback=LocalKeyRoleFeedback.current
+    val rawReadings=LocalConversionReadings.current.value
+    val canUndo=com.wasimaster.wmkeyboard.ime.UndoReadingSelection in rawReadings
+    val readings=rawReadings.filterNot { it==com.wasimaster.wmkeyboard.ime.UndoReadingSelection }
+    val hints=LocalLiveUiState.current?.value?.conversionReadingHints ?: state.conversionReadingHints
+    val landscape=LocalConfiguration.current.orientation==Configuration.ORIENTATION_LANDSCAPE
+    val right=readingColumnOnRight(state.settings,landscape)
+    var showAllCorrections by remember(readings) { mutableStateOf(false) }
+    val visibleReadings=visibleReadingChoices(readings,hints,showAllCorrections)
+    val textDirection=LocalLayoutDirection.current
+    val undoDescription=stringResource(R.string.ime_glide_undo_syllable)
+    val editDescription=stringResource(R.string.ime_glide_reading_edit)
+    val hasColumn=readings.isNotEmpty() || canUndo
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+        Row(Modifier.fillMaxWidth().height(keyRowsHeight(state))) {
+            @Composable fun ReadingColumn() {
+                Column(Modifier.width(if(hints.isEmpty()) 80.dp else 112.dp).fillMaxHeight()) {
+                    LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                        itemsIndexed(visibleReadings) { index,reading ->
+                            Column(Modifier.fillMaxWidth().clickable {
+                                readingFeedback(KeySoundTarget.DEFAULT)
+                                onKey(Key(label=reading,output=reading,action=KeyAction.ReadingColumn))
+                            }.padding(horizontal=8.dp,vertical=12.dp)) {
+                                Text(reading,color=MaterialTheme.colorScheme.onSurface,fontSize=16.sp,
+                                    fontWeight=if(hints[reading]?.selected ?: (index==0)) FontWeight.SemiBold else FontWeight.Normal)
+                                hints[reading]?.let { hint ->
+                                    Box(Modifier.fillMaxWidth().height(3.dp).background(MaterialTheme.colorScheme.onSurface.copy(alpha=0.12f))) {
+                                        Box(Modifier.fillMaxWidth(hint.weight.coerceIn(0.01f,1f)).height(3.dp).background(MaterialTheme.colorScheme.primary))
+                                    }
+                                    Text(stringResource(R.string.ime_glide_reading_evidence,(hint.weight*100).roundToInt(),(hint.deviation*100).roundToInt()),
+                                        fontSize=10.sp,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                                    if(hint.neighbour) Text(stringResource(R.string.ime_glide_reading_neighbour),fontSize=10.sp,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                        if(visibleReadings.size<readings.size) item(key="more-nearby-readings") {
+                            Text(stringResource(R.string.ime_glide_reading_more),fontSize=12.sp,color=MaterialTheme.colorScheme.primary,
+                                modifier=Modifier.fillMaxWidth().clickable { readingFeedback(KeySoundTarget.DEFAULT);showAllCorrections=true }.padding(8.dp))
+                        }
+                    }
+                    HorizontalDivider()
+                    // Selection controls own a fixed footer, outside the scrolling readings.
+                    Row(Modifier.fillMaxWidth().height(48.dp)) {
+                        if(hints.values.any { it.selected }) Box(Modifier.weight(1f).fillMaxHeight()
+                            .semantics { contentDescription=editDescription }.clickable {
+                                readingFeedback(KeySoundTarget.DEFAULT)
+                                onKey(Key(label="",output=com.wasimaster.wmkeyboard.ime.EditGlideReading,action=KeyAction.ReadingColumn))
+                            },contentAlignment=Alignment.Center) {
+                            Text("⇄",fontSize=26.sp,color=MaterialTheme.colorScheme.primary)
+                        }
+                        Box(Modifier.weight(1f).fillMaxHeight().semantics { contentDescription=undoDescription }
+                            .clickable(enabled=canUndo) {
+                                readingFeedback(KeySoundTarget.DEFAULT)
+                                onKey(Key(label="",output=com.wasimaster.wmkeyboard.ime.UndoReadingSelection,action=KeyAction.ReadingColumn))
+                            },contentAlignment=Alignment.Center) {
+                            Text("↶",fontSize=28.sp,color=if(canUndo) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha=0.35f))
+                        }
+                    }
+                }
+            }
+            if(!right && hasColumn) { ReadingColumn();VerticalDivider() }
+            Box(Modifier.weight(1f)) {
+                CompositionLocalProvider(LocalLayoutDirection provides textDirection) { CandidateGridBody(state,onCandidate,onAdjust) }
+            }
+            if(right && hasColumn) { VerticalDivider();ReadingColumn() }
+        }
+    }
+}
+
+@Composable
+private fun CandidateGridBody(
+    state: KeyboardUiState,
+    onCandidate: (String, Int) -> Unit,
     onAdjust: (String, Int, CandidateAdjustment) -> Unit = { _, _, _ -> },
 ) {
     val textScale = state.settings.suggestionStrip.textScale
@@ -7286,20 +7424,6 @@ private fun CandidateGridPanel(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
-        // A held candidate's menu (#580), over the grid it was held in.
-        state.expandedCandidates.getOrNull(menuFor)?.let { held ->
-            Row(modifier = Modifier.fillMaxWidth().height(CandidateGridRowHeight)) {
-                CandidateMenu(
-                    candidate = held,
-                    textScale = textScale,
-                    onPick = { adjustment ->
-                        onAdjust(held, menuFor, adjustment)
-                        menuFor = -1
-                    },
-                    onDismiss = { menuFor = -1 },
-                )
-            }
-        }
         // Pages of word suggestions (#385) have no chevron on the strip to
         // close them by, so they carry their own way back to the keys.
         if (!state.composer.isConversion) {
@@ -7330,7 +7454,12 @@ private fun CandidateGridPanel(
                 modifier = cell
                     .padding(2.dp)
                     .widthIn(min = CandidateChipMinWidth)
-                    .height(CandidateGridRowHeight)
+                    // Conversion sentences need as many lines as their text takes.
+                    // The panel itself scrolls, so no suffix needs to be hidden.
+                    .then(
+                        if (state.composer.isConversion) Modifier.heightIn(min = CandidateGridRowHeight)
+                        else Modifier.height(CandidateGridRowHeight),
+                    )
                     .combinedClickable(
                         onLongClick = if (adjustable) {
                             { menuFor = index }
@@ -7342,12 +7471,21 @@ private fun CandidateGridPanel(
             ) {
                 Text(
                     text = candidate,
-                    modifier = Modifier.padding(horizontal = 10.dp),
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                     color = MaterialTheme.colorScheme.onSurface,
                     fontSize = CandidateFontSize * textScale,
                     fontWeight = if (index == 0) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 1,
+                    maxLines = if (state.composer.isConversion) Int.MAX_VALUE else 1,
                     overflow = TextOverflow.Ellipsis,
+                )
+                CandidatePopupMenu(
+                    candidate = candidate,
+                    expanded = menuFor == index,
+                    onDismiss = { menuFor = -1 },
+                    onPick = { adjustment ->
+                        menuFor = -1
+                        onAdjust(candidate, index, adjustment)
+                    },
                 )
             }
         }
@@ -7407,104 +7545,49 @@ private fun CandidateGridPanel(
     }
 }
 
-/**
- * What holding a conversion candidate offers (#580), in the strip's own row:
- * the candidate, then show it earlier, show it later, never show it. Every
- * shipping Chinese IME has this, and it is the only way to tell the keyboard
- * that 亡八 is not a word anyone types — the decoder will not learn that from
- * the user simply not picking it.
- */
+/** Anchored popup keeps every action readable, even beside a reading column. */
 @Composable
-private fun RowScope.CandidateMenu(
+private fun CandidatePopupMenu(
     candidate: String,
-    textScale: Float,
+    expanded: Boolean,
     onPick: (CandidateAdjustment) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier.weight(1f).fillMaxHeight(),
-        verticalAlignment = Alignment.CenterVertically,
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        properties = MenuPopupProperties,
+        modifier = Modifier.widthIn(min = 200.dp, max = 280.dp),
     ) {
-        Text(
-            text = candidate,
-            modifier = Modifier.padding(horizontal = 10.dp).weight(1f, fill = false),
-            color = MaterialTheme.colorScheme.onSurface,
-            fontSize = CandidateFontSize * textScale,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        Text(candidate, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.ime_candidate_menu_earlier)) },
+            leadingIcon = { Icon(Icons.Outlined.KeyboardArrowUp, null) },
+            onClick = { onPick(CandidateAdjustment.PROMOTE) },
         )
-        CandidateMenuItem(Icons.Outlined.KeyboardArrowUp, stringResource(R.string.ime_candidate_menu_earlier)) {
-            onPick(CandidateAdjustment.PROMOTE)
-        }
-        CandidateMenuItem(Icons.Outlined.KeyboardArrowDown, stringResource(R.string.ime_candidate_menu_later)) {
-            onPick(CandidateAdjustment.DEMOTE)
-        }
-        CandidateMenuItem(Icons.Outlined.RemoveCircleOutline, stringResource(R.string.ime_candidate_menu_never)) {
-            onPick(CandidateAdjustment.BLOCK)
-        }
-        // 以词定字: type only the first or the last character of a word, for
-        // a character that is hard to find under its own reading.
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.ime_candidate_menu_later)) },
+            leadingIcon = { Icon(Icons.Outlined.KeyboardArrowDown, null) },
+            onClick = { onPick(CandidateAdjustment.DEMOTE) },
+        )
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.ime_candidate_menu_never)) },
+            leadingIcon = { Icon(Icons.Outlined.RemoveCircleOutline, null) },
+            onClick = { onPick(CandidateAdjustment.BLOCK) },
+        )
         if (candidate.codePointCount(0, candidate.length) >= 2) {
             val first = candidate.substring(0, candidate.offsetByCodePoints(0, 1))
             val last = candidate.substring(candidate.offsetByCodePoints(candidate.length, -1))
-            CandidateCharItem(first, stringResource(R.string.ime_candidate_menu_first_desc, first), textScale) {
-                onPick(CandidateAdjustment.FIRST_CHARACTER)
-            }
-            CandidateCharItem(last, stringResource(R.string.ime_candidate_menu_last_desc, last), textScale) {
-                onPick(CandidateAdjustment.LAST_CHARACTER)
-            }
-        }
-        Spacer(Modifier.weight(1f))
-        IconButton(onClick = onDismiss) {
-            Icon(
-                Icons.Outlined.Close,
-                contentDescription = stringResource(R.string.ime_candidate_menu_close_desc),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.ime_candidate_menu_first_desc, first)) },
+                onClick = { onPick(CandidateAdjustment.FIRST_CHARACTER) },
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.ime_candidate_menu_last_desc, last)) },
+                onClick = { onPick(CandidateAdjustment.LAST_CHARACTER) },
             )
         }
-    }
-}
-
-/**
- * One character of the held candidate in [CandidateMenu], drawn as itself
- * in a tinted box: a tap types only that character.
- */
-@Composable
-private fun CandidateCharItem(char: String, description: String, textScale: Float, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxHeight()
-            .clickable(onClick = onClick)
-            .semantics { contentDescription = description }
-            .padding(horizontal = 4.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = char,
-            modifier = Modifier
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
-                .padding(horizontal = 8.dp, vertical = 2.dp),
-            color = MaterialTheme.colorScheme.primary,
-            fontSize = CandidateFontSize * textScale,
-            maxLines = 1,
-        )
-    }
-}
-
-/** One action in [CandidateMenu]: an icon and a word, one tap target. */
-@Composable
-private fun CandidateMenuItem(icon: ImageVector, label: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxHeight()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.width(4.dp))
-        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, maxLines = 1)
     }
 }
 
@@ -16199,7 +16282,7 @@ private fun KeyboardBody(
                 )
                 PanelMode.SOUND_HAPTICS -> SoundHapticsPanel(state, onSoundHaptic, onOpenRoute)
                 PanelMode.NUMPAD -> NumpadPanelHost(state, panelCallbacks)
-                PanelMode.CANDIDATES -> CandidateGridPanel(state, onCandidate, suggestionHold.onCandidateAdjust)
+                PanelMode.CANDIDATES -> CandidateGridPanel(state, onCandidate, suggestionHold.onCandidateAdjust, onKey)
                 PanelMode.HANDWRITING -> HandwritingPanelHost(
                     state, panelCallbacks,
                     onStroke = onHandwritingStroke,
@@ -17281,6 +17364,8 @@ internal class GlidePickerState {
      */
     var anchorKeyPx = 0f
         private set
+    var readingSlots: List<Int> = emptyList()
+        private set
 
     /** True while the picker is up, which is from its open until the lift. */
     val isOpen: Boolean
@@ -17291,8 +17376,9 @@ internal class GlidePickerState {
      * key [keyPx] tall — the spacing unit for the targets, and the same height
      * the cancel zone is measured in.
      */
-    fun open(choices: List<String>, limit: Int, x: Float, y: Float, keyPx: Float = 0f) {
+    fun open(choices: List<String>, limit: Int, x: Float, y: Float, keyPx: Float = 0f, slots: List<Int> = emptyList()) {
         words = choices.take(limit.coerceIn(MIN_TARGETS, MAX_TARGETS))
+        readingSlots=slots
         anchorX = x
         anchorY = y
         anchorKeyPx = keyPx
@@ -18318,17 +18404,26 @@ private fun KeyboardSettings.withKeyHeights(keyHeightDp: Int, numberRowHeightDp:
     copy(keyHeightDp = keyHeightDp, numberRowHeightDp = numberRowHeightDp)
 
 /** What the resize overlay is showing, in place of the stored sizes. */
-private fun KeyboardSettings.withResizePreview(preview: ResizeValues, scale: Float): KeyboardSettings = copy(
-    keyHeightDp = (preview.keyHeightDp * scale).roundToInt(),
-    numberRowHeightDp = (preview.numberRowHeightDp * scale).roundToInt(),
-    bottomPaddingDp = preview.bottomPaddingDp,
-    layoutBehavior = layoutBehavior.copy(
-        sidePadLeftScale = preview.sidePadLeft,
-        sidePadRightScale = preview.sidePadRight,
-        fullWidthBars = preview.fullWidthBars,
-    ),
-    toolbarHeightDp = preview.toolbarHeightDp,
-)
+internal fun KeyboardSettings.withResizePreview(preview: ResizeValues, scale: Float, landscape: Boolean = false): KeyboardSettings {
+    val oneHandedHere = oneHandedModeFor(landscape) != OneHandedMode.OFF
+    val profile = oneHanded.forLandscape(landscape)
+    val slack = (preview.sidePadLeft + preview.sidePadRight).coerceAtLeast(0.0001f)
+    return copy(
+        keyHeightDp = (preview.keyHeightDp * scale).roundToInt(),
+        numberRowHeightDp = (preview.numberRowHeightDp * scale).roundToInt(),
+        bottomPaddingDp = preview.bottomPaddingDp,
+        layoutBehavior = if (oneHandedHere) layoutBehavior else layoutBehavior.copy(
+            sidePadLeftScale = preview.sidePadLeft, sidePadRightScale = preview.sidePadRight,
+            fullWidthBars = preview.fullWidthBars,
+        ),
+        oneHanded = if (!oneHandedHere) oneHanded else oneHanded.withProfile(landscape, profile.copy(
+            widthPercent = ((1f - slack) * 100).roundToInt().coerceIn(30, 95),
+            positionPercent = (preview.sidePadLeft / slack * 100).roundToInt().coerceIn(0, 100),
+            heightScale = 100, bottomPaddingDp = preview.bottomPaddingDp,
+        )),
+        toolbarHeightDp = preview.toolbarHeightDp,
+    )
+}
 
 internal fun KeyboardUiState.peekedFromPanel(mode: LayoutMode): KeyboardUiState = copy(
     layoutMode = mode,
@@ -20591,6 +20686,18 @@ private fun KeyRows(
     // choices and the close-call flag change with every preview; the picker's
     // settings and the haptic switch can change under a finger too.
     val glideChoices = rememberUpdatedState(state.glideChoices)
+    val pinyinFallback=rememberUpdatedState(state.pinyinGlidePreview)
+    val pinyinLive: State<PinyinGlidePreview?> = remember(liveUi) {
+        object : State<PinyinGlidePreview?> {
+            override val value: PinyinGlidePreview? get()=if(liveUi!=null) liveUi.value.pinyinGlidePreview else pinyinFallback.value
+        }
+    }
+    val pinyinOptions = rememberUpdatedState(state.settings.cjk)
+    val pinyinMode = rememberUpdatedState(if(state.composer.glidesPinyinReadings && state.captureTarget()==null &&
+        state.settings.cjk.pinyinDoublePinyin != com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinScheme.OFF)
+        state.settings.cjk.pinyinGlideMode else 0)
+    val undoPinyinCaption = rememberUpdatedState("↶")
+    val retryPinyinCaption = rememberUpdatedState("↺")
     val glideCloseCall = rememberUpdatedState(state.glideCloseCall)
     val glideSettings = rememberUpdatedState(state.settings.gesture)
     val hapticOn = rememberUpdatedState(state.settings.haptics.enabled)
@@ -21677,6 +21784,22 @@ private fun KeyRows(
                     // it on the previous stroke's words — or the previous
                     // word's, after a spacebar crossing.
                     var previewedSeg = false
+                    val pinyinSession=PinyinGlideSession()
+                    var pinyinFrozen=emptyList<Pair<String,PinyinGlideChoice>>()
+                    var pinyinPopupBlocked=false
+                    var pinyinReturning=false
+                    var pinyinLocked=false
+                    var pinyinLockedPoints: List<GesturePoint> = emptyList()
+                    var pinyinPendingPick: String? = null
+                    var pinyinPairLeftStart=false
+                    var pinyinPairEndpoint: Offset? = null
+                    var pinyinPairEnteredAt=0L
+                    var pinyinFinger=down.position
+                    var pinyinHoverAnchor=down.position
+                    val pinyinRestart=PinyinGlideRestart()
+                    var pinyinHoverSince=0L
+                    var pinyinProbeAfter=0L
+                    var pinyinRequestedEnd=Long.MIN_VALUE
                     // How far below the anchor the finger has to drop before a
                     // lift cancels the stroke: the anchor key's height, read
                     // when the picker opens.
@@ -21692,21 +21815,89 @@ private fun KeyRows(
                     // finished and the finger is only choosing. Sliding to a
                     // target used to keep feeding the decoder, so the word the
                     // picker showed was not the word the lift decoded (#96).
+                    // Resolve the visible cell first: staggered rows and wide merged keys
+                    // do not have circular hit regions around their letter centres.
+                    fun pinyinKey(point: GesturePoint?): KeyCenter? {
+                        point ?: return null
+                        val cell=liveRects.value.letterCellAt(Offset(point.x,point.y)+boxOrigin)
+                            ?.translate(-boxOrigin) ?: return null
+                        return pinyinKeyForCell(cell,keyList.orEmpty())
+                    }
+                    fun pinyinPoints(points: List<GesturePoint>): List<GesturePoint> {
+                        if(pinyinMode.value!=2 || points.isEmpty()) return points
+                        fun snap(point: GesturePoint): GesturePoint = pinyinKey(point)?.let {
+                            point.copy(x=it.x,y=it.y)
+                        } ?: point
+                        return listOf(snap(points.first()),snap(points.last()))
+                    }
+                    fun pinyinSameKeyLoop(): Boolean {
+                        if (seg.size < 5 || keyWidth.value <= 0f) return false
+                        val start = pinyinKey(seg.first()) ?: return false
+                        val end = pinyinKey(seg.last()) ?: return false
+                        if (start.x != end.x || start.y != end.y) return false
+                        val cell = liveRects.value.letterCellAt(Offset(seg.first().x,seg.first().y)+boxOrigin)
+                        val width = (cell?.width ?: keyWidth.value) / keyWidth.value
+                        return com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinGlide.hasLoop(
+                            seg.map { com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinGlide.Point(
+                                ((it.x-start.x)/keyWidth.value).toDouble(),
+                                ((it.y-start.y)/keyWidth.value).toDouble(),it.t) },
+                            listOf(com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinGlide.Key("x",0.0,0.0,width.toDouble())),
+                        )
+                    }
+                    fun resumePinyin(point: GesturePoint, continuation: GesturePoint? = null) {
+                        seg.add(point)
+                        continuation?.let { seg.add(it) }
+                        pinyinReturning=false
+                        pinyinRestart.clear()
+                        pinyinPairLeftStart=false
+                        pinyinPairEndpoint=null
+                        pinyinPairEnteredAt=SystemClock.uptimeMillis()
+                        previewedSeg=continuation!=null && pinyinMode.value==2 && seg.size>=2
+                        val tail=continuation ?: point
+                        dwell.reset(tail.x,tail.y,tail.t)
+                        trail.begin()
+                        if(previewedSeg) keyList?.let { keys ->
+                            onGesture(pinyinPoints(seg),keys,keyWidth.value,GlideVerdict.Pinyin(pinyinSession.choices,preview=true,strokeId=down.uptimeMillis))
+                        }
+                    }
                     fun askHere() {
                         // The anchor key's height is both the cancel zone's
                         // depth and the unit the targets are spaced in, so it
                         // is read once and handed to the picker.
+                        val touch=seg.lastOrNull()?.let { Offset(it.x,it.y) } ?: Offset(dwell.stillX,dwell.stillY)
+                        val anchor=if(pinyinMode.value!=0) touch else Offset(dwell.stillX,dwell.stillY)
                         val keyHeight = liveRects.value
-                            .cellAt(Offset(dwell.stillX, dwell.stillY) + boxOrigin)?.height
+                            .cellAt(anchor + boxOrigin)?.height
                             ?: keyWidth.value
+                        val readingPreview=pinyinLive.value
+                        val readingMode=pinyinMode.value
+                        val choices=if(readingMode==0) glideChoices.value else {
+                            if(readingPreview==null || readingPreview.start!=seg.firstOrNull()?.t || readingPreview.end!=seg.lastOrNull()?.t || (readingPreview.choices.isEmpty() && readingMode!=2 && !pinyinSession.canUndo)) return
+                            if(readingMode==1 && readingPreview.choices.isNotEmpty() && pinyinSession.choices.sumOf { it.reading.length } + readingPreview.choices.first().reading.length > pinyinOptions.value.pinyinGlidePopupLimit) {
+                                pinyinPopupBlocked=true
+                                return
+                            }
+                            val repeated=readingMode==2 && readingPreview.keys==1
+                            pinyinFrozen=readingPreview.choices.filter { readingMode==2 || pinyinSession.choices.sumOf { it.reading.length }+it.reading.length<=pinyinOptions.value.pinyinGlidePopupLimit }
+                                .take(if(readingMode==2) 4 else if(pinyinSession.canUndo) 2 else 3).map { choice ->
+                                (if(repeated) "↺ ${choice.reading}" else choice.reading) to choice
+                            }
+                            pinyinFrozen.map { it.first } + if(pinyinSession.canUndo) listOf(undoPinyinCaption.value) else if(readingMode==2) listOf(retryPinyinCaption.value) else emptyList()
+                        }
                         picker.open(
-                            glideChoices.value,
-                            glideSettings.value.pickerChoices,
-                            dwell.stillX,
-                            dwell.stillY,
+                            choices,
+                            if(readingMode==0) glideSettings.value.pickerChoices else if(readingMode==2) 5 else 3,
+                            anchor.x,
+                            anchor.y,
                             keyHeight,
+                            if(readingMode==2) pinyinFrozen.map { it.second.pairSlot } else emptyList(),
                         )
-                        cancelBelowPx = keyHeight
+                        if(readingMode==2 && picker.isOpen) {
+                            pinyinLocked=true
+                            pinyinLockedPoints=seg.toList()
+                            pinyinPendingPick=null
+                        }
+                        cancelBelowPx = if(readingMode==2) Float.POSITIVE_INFINITY else if(readingMode==0) keyHeight else keyHeight*1.8f
                         // The trail fades where it is; its head stops following
                         // the finger.
                         trail.release()
@@ -21716,6 +21907,39 @@ private fun KeyRows(
                         // KeyboardScreen parameter on a function already at
                         // the method-size limit.
                         if (hapticOn.value) pickerHaptic()
+                    }
+                    fun acceptPinyinHover(explicit: String? = null): Boolean {
+                        if(pinyinMode.value==0) return false
+                        val selected=explicit ?: picker.picked() ?: return false
+                        if(selected==undoPinyinCaption.value) {
+                            // Discard the pair currently offered by the picker. Earlier
+                            // confirmed syllables belong to the session and must survive.
+                            seg=ArrayList()
+                        } else if(selected==retryPinyinCaption.value) {
+                            seg=ArrayList()
+                        } else {
+                            val choice=pinyinFrozen.firstOrNull { it.first==selected }?.second ?: return false
+                            pinyinSession.select(choice,seg)
+                            seg=ArrayList()
+                        }
+                        pinyinRestart.afterSelection(liveRects.value
+                            .letterCellAt(pinyinFinger+boxOrigin)?.translate(-boxOrigin),pinyinFinger)
+                        dwell.reset(pinyinFinger.x,pinyinFinger.y,SystemClock.uptimeMillis())
+                        picker.close()
+                        pinyinLocked=false
+                        pinyinLockedPoints=emptyList()
+                        pinyinPendingPick=null
+                        pinyinPairLeftStart=false
+                        pinyinPairEndpoint=null
+                        pinyinPairEnteredAt=0L
+                        previewedSeg=false
+                        pinyinRequestedEnd=Long.MIN_VALUE
+                        pinyinProbeAfter=0L
+                        pinyinReturning=true
+                        pinyinHoverSince=0L
+                        keyList?.let { onGesture(emptyList(),it,keyWidth.value,GlideVerdict.Pinyin(pinyinSession.choices,preview=true,strokeId=down.uptimeMillis)) }
+                        if(hapticOn.value) pickerHaptic()
+                        return true
                     }
                     // The stroke is a glide from here on: the trail starts,
                     // and the grid and the targets a glide reads are fixed.
@@ -21783,7 +22007,28 @@ private fun KeyRows(
                         // Only an unfrozen stroke off the spacebar is on a
                         // clock: a finger resting on the spacebar mid-phrase
                         // is thinking, not asking.
-                        val timeout = if (isGesture && !picker.isOpen && !crossings.overBar) {
+                        val nowForPicker=SystemClock.uptimeMillis()
+                        val pairStart=if(pinyinMode.value==2) pinyinKey(seg.firstOrNull())?.let { Offset(it.x,it.y) } else null
+                        val pairEnd=if(pinyinMode.value==2) pinyinKey(seg.lastOrNull())?.let { Offset(it.x,it.y) } else null
+                        if(pairStart!=null && pairEnd!=null) {
+                            if(pairEnd!=pairStart) pinyinPairLeftStart=true
+                            if(pairEnd!=pinyinPairEndpoint) {
+                                pinyinPairEndpoint=pairEnd
+                                pinyinPairEnteredAt=nowForPicker
+                            }
+                        }
+                        val pairLoop = pinyinMode.value==2 && pinyinSameKeyLoop()
+                        val pairArmed=pinyinMode.value!=2 || (pairStart!=null && pairEnd!=null &&
+                            (if(pairStart==pairEnd) pairLoop else pinyinPairLeftStart))
+                        val timeout = if(pinyinMode.value!=0 && isGesture && picker.isOpen && picker.hover>=0) {
+                            pinyinHoverSince+(if(pinyinMode.value==2) 45L else 50L)-nowForPicker
+                        } else if(pinyinMode.value==2 && isGesture && pinyinReturning && pinyinRestart.deadline!=null) {
+                            pinyinRestart.deadline!!-nowForPicker
+                        } else if(pinyinMode.value!=0 && isGesture && !picker.isOpen && !pinyinLocked && !pinyinReturning && !pinyinPopupBlocked && previewedSeg && pairArmed) {
+                            // Longer than a touch-report gap: moving across the first key is not a pause.
+                            val delay=if(pinyinMode.value==2) 28L else dwellMs
+                            maxOf(dwell.stillSince+delay,pinyinProbeAfter,if(pinyinMode.value==2) pinyinPairEnteredAt+28L else 0L)-nowForPicker
+                        } else if (pinyinMode.value==0 && isGesture && !picker.isOpen && !crossings.overBar) {
                             dwell.timeout(SystemClock.uptimeMillis(), closeCall, holdToAsk, dwellMs)
                         } else {
                             null
@@ -21801,6 +22046,22 @@ private fun KeyRows(
                             this.withTimeoutOrNull(timeout) { awaitPointerEvent(PointerEventPass.Initial) }
                         }
                         if (event == null) {
+                            if(pinyinMode.value!=0) {
+                                if(pinyinMode.value==2 && pinyinReturning) {
+                                    pinyinRestart.settle(SystemClock.uptimeMillis())?.let { point ->
+                                        resumePinyin(point)
+                                    }
+                                } else if(picker.isOpen) acceptPinyinHover() else {
+                                    if(pinyinRequestedEnd!=seg.lastOrNull()?.t && (pinyinMode.value==1 || pinyinLive.value?.end!=seg.lastOrNull()?.t || pinyinLive.value?.start!=seg.firstOrNull()?.t)) {
+                                        pinyinRequestedEnd=seg.lastOrNull()?.t ?: Long.MIN_VALUE
+                                        keyList?.let { onGesture(pinyinPoints(seg),it,keyWidth.value,GlideVerdict.Pinyin(pinyinSession.choices,preview=true,strokeId=down.uptimeMillis)) }
+                                    }
+                                    askHere()
+                                    if(pinyinMode.value==2 && picker.isOpen && pinyinFrozen.size==1) acceptPinyinHover(pinyinFrozen.first().first)
+                                    if(!picker.isOpen) pinyinProbeAfter=SystemClock.uptimeMillis()+if(pinyinMode.value==2) 8L else 80L
+                                }
+                                continue
+                            }
                             val now = SystemClock.uptimeMillis()
                             val choices = glideChoices.value.size
                             when (dwell.onTimeout(now, closeCall, holdToAsk, dwellMs, choices)) {
@@ -21817,11 +22078,12 @@ private fun KeyRows(
                         if (fingerGate.claimed) {
                             picker.close()
                             trail.clear()
-                            if (previewedSeg) {
+                            if (previewedSeg || (isGesture && pinyinMode.value != 0)) {
                                 keyList?.let { onGesture(seg, it, keyWidth.value, GlideVerdict.Cancel) }
                             }
                             return@awaitEachGesture
                         }
+                        pinyinFinger=change.position
                         if (!change.pressed) {
                             liftAt = GesturePoint(change.position.x, change.position.y, change.uptimeMillis)
                             // Lifted off a flick key while still undecided: the
@@ -21846,6 +22108,32 @@ private fun KeyRows(
                             ) {
                                 change.consume()
                                 strayTap.value(downKey, down.id)
+                                return@awaitEachGesture
+                            }
+                            if(isGesture && pinyinMode.value!=0) {
+                                // Own the release before any callback can change composing state or dismiss overlays.
+                                change.consume()
+                                if(picker.isOpen) picker.track(change.position.x,change.position.y,cancelBelowPx)
+                                val selection=picker.picked()
+                                // A lift can carry the last movement even when no final
+                                // move event was delivered. Decode that endpoint too.
+                                if (!picker.isOpen && !pinyinLocked && !pinyinReturning) {
+                                    val lifted = GesturePoint(change.position.x,change.position.y,change.uptimeMillis)
+                                    if (seg.lastOrNull() != lifted) seg.add(lifted)
+                                }
+                                val releaseStart=pinyinKey(seg.firstOrNull())
+                                val releaseEnd=pinyinKey(seg.lastOrNull())
+                                val releaseArmed=pinyinMode.value!=2 || (releaseStart!=null && releaseEnd!=null &&
+                                    (if(releaseStart.x==releaseEnd.x && releaseStart.y==releaseEnd.y) pinyinSameKeyLoop() else true))
+                                val picked=pinyinFrozen.firstOrNull { it.first==selection }?.second
+                                keyList?.let { keys ->
+                                    onGesture(pinyinPoints(if(pinyinLocked) pinyinLockedPoints else seg.toList()),keys,keyWidth.value,
+                                        if(pinyinMode.value==2 && selection==null && (pinyinLocked || pinyinReturning || !releaseArmed || seg.size<2 || pinyinKey(seg.lastOrNull())==null))
+                                            GlideVerdict.Pinyin(pinyinSession.choices,rawTail="",strokeId=down.uptimeMillis)
+                                        else if(picker.cancelling) GlideVerdict.Cancel else GlideVerdict.Pinyin(pinyinSession.choices,picked=picked,strokeId=down.uptimeMillis,
+                                            rawTail=if(selection==retryPinyinCaption.value || selection==undoPinyinCaption.value) "" else null))
+                                }
+                                picker.close();trail.release();change.consume()
                                 return@awaitEachGesture
                             }
                             if (isGesture) change.consume()
@@ -21896,12 +22184,53 @@ private fun KeyRows(
                         if (isGesture) {
                             change.consume()
                             reachPx = maxOf(reachPx, (change.position - down.position).getDistance())
-                            if (picker.isOpen) {
+                            if (picker.isOpen || pinyinLocked) {
                                 // Frozen: the stroke is finished and the finger
                                 // is only choosing. Hover and the cancel zone
                                 // are all a move can change now.
                                 val entered = picker.track(change.position.x, change.position.y, cancelBelowPx)
                                 if (entered && hapticOn.value) pickerHaptic()
+                                if(pinyinMode.value!=0 && (entered || picker.hover<0 ||
+                                    (pinyinMode.value==2 && (change.position-pinyinHoverAnchor).getDistance()>keyWidth.value*0.08f))) {
+                                    pinyinHoverSince=change.uptimeMillis
+                                    pinyinHoverAnchor=change.position
+                                }
+                                continue
+                            }
+                            val letterCell=if(pinyinMode.value==2) liveRects.value
+                                .letterCellAt(change.position+boxOrigin)?.translate(-boxOrigin) else null
+                            val outsideGrid=change.position.x < -keyWidth.value*0.1f ||
+                                change.position.x > boxSize.width+keyWidth.value*0.1f ||
+                                change.position.y < -keyWidth.value*0.1f ||
+                                change.position.y > boxSize.height+keyWidth.value*0.1f
+                            if(pinyinMode.value==2 && !pinyinReturning && outsideGrid) {
+                                // Gaps and non-letter keys inside the keyboard do not end a stroke.
+                                pinyinReturning=true
+                                pinyinRestart.clear()
+                                seg=ArrayList()
+                                previewedSeg=false
+                                pinyinPairLeftStart=false
+                                pinyinPairEndpoint=null
+                                pinyinRequestedEnd=Long.MIN_VALUE
+                                trail.release()
+                            }
+                            if(pinyinMode.value!=0 && pinyinReturning) {
+                                if(pinyinMode.value==2) {
+                                    val point=GesturePoint(change.position.x,change.position.y,change.uptimeMillis)
+                                    if(outsideGrid) pinyinRestart.clear()
+                                    val restart=pinyinRestart.sample(point,letterCell,keyWidth.value)
+                                    if(restart!=null) resumePinyin(restart.first,restart.second)
+                                } else {
+                                    val nearLetter=keyList.orEmpty().any { key ->
+                                        kotlin.math.hypot(change.position.x-key.x,change.position.y-key.y)<=keyWidth.value*0.55f
+                                    }
+                                    if(nearLetter) {
+                                        pinyinReturning=false
+                                        seg.add(GesturePoint(change.position.x,change.position.y,change.uptimeMillis))
+                                        dwell.reset(change.position.x,change.position.y,change.uptimeMillis)
+                                        trail.begin()
+                                    }
+                                }
                                 continue
                             }
                             // Crossing the spacebar ends the current word and
@@ -21971,7 +22300,7 @@ private fun KeyRows(
                                 change.position.x,
                                 change.position.y,
                                 change.uptimeMillis,
-                                keyWidth.value * PICKER_STILL_WIDTHS,
+                                keyWidth.value * if(pinyinMode.value==2) 0.10f else PICKER_STILL_WIDTHS,
                             )
                             // Appends and drops the aged tail in one go; only
                             // the draw phase ever reads it back.
@@ -22001,7 +22330,7 @@ private fun KeyRows(
                             // Live preview of the word being drawn now, at a
                             // fixed wall-clock cadence.
                             val sincePreview = change.uptimeMillis - lastPreviewMs
-                            if (sincePreview >= PREVIEW_INTERVAL_MS && seg.size >= PREVIEW_MIN_POINTS) {
+                            if (sincePreview >= (if(pinyinMode.value==1) 160L else if(pinyinMode.value==2) 8L else PREVIEW_INTERVAL_MS) && seg.size >= (if(pinyinMode.value==2) 2 else PREVIEW_MIN_POINTS)) {
                                 lastPreviewMs = change.uptimeMillis
                                 keyList?.let { keys ->
                                     previewedSeg = true
@@ -22009,7 +22338,8 @@ private fun KeyRows(
                                         crossings.withHeld(seg), shiftCuts, shiftCenter, keyWidth.value,
                                         letterGlide.value, endedOnShift = wasOverShift,
                                     )
-                                    onGesturePreview(
+                                    if(pinyinMode.value==2) onGesture(pinyinPoints(points),keys,keyWidth.value,
+                                        GlideVerdict.Pinyin(pinyinSession.choices,preview=true,strokeId=down.uptimeMillis)) else if(pinyinMode.value==0) onGesturePreview(
                                         points, keys, keyWidth.value,
                                         wordCaseOr(case, letterGlide.value, shiftCrossings),
                                     )
@@ -23507,7 +23837,8 @@ private fun GlideStrokeOverlay(
     // shift key previews "That" and not the "that" it used to (#162): the
     // board's shift never changes for a drawn gesture, and the crossings
     // ride in on the preview instead.
-    val pillWord = state.glideWord
+    val pinyinKeys = state.pinyinGlidePreview?.keyLabels?.takeIf { it.isNotEmpty() && trail.visible && !trail.released && picker.words.isEmpty() }
+    val pillWord = pinyinKeys ?: state.glideWord
         ?.takeIf { glide.wordPreview && trail.visible && !trail.released && picker.words.isEmpty() }
         ?.let { word ->
             state.glideCased[word]
@@ -23533,7 +23864,7 @@ private fun GlideStrokeOverlay(
         // finger and cannot be a sentence wide.
         val phrase = state.glidePhrase.takeLast(GLIDE_PILL_PHRASE_WORDS)
         val pillText = if (phrase.isEmpty() || pillWord == null) pillWord else (phrase + pillWord).joinToString(" ")
-        GlideOverlay(trail, picker, pillText, glide, boxSize, pillPromise, pillExpansion, state.glideExpansions)
+        GlideOverlay(trail, picker, pillText, glide, boxSize, pillPromise, pillExpansion, state.glideExpansions, reading=state.composer.glidesPinyinReadings)
     }
 }
 
@@ -23632,6 +23963,7 @@ private fun GlideOverlay(
     expansion: String? = null,
     /** The stroke's triggers and what they expand to, for the picker's targets (#205). */
     expansions: Map<String, GlideExpansion> = emptyMap(),
+    reading: Boolean = false,
 ) {
     val theme = LocalKbTheme.current
     val density = LocalDensity.current
@@ -23655,19 +23987,33 @@ private fun GlideOverlay(
         ?: with(density) { GlidePickerHeight.toPx() }
     // Four or five words may need a second row; estimated from the count
     // rather than measured, for the same reason the pill's height is.
-    val pickerRows = if (words.size <= GlidePickerRowMax) 1 else 2
+    val pickerRows = if (reading) 2 else if (words.size <= GlidePickerRowMax) 1 else 2
     val headroomPx = with(density) {
         val pillHeight = glide.wordPreviewFontSp.sp.toPx() * GlidePillLineHeightRatio +
             (GlidePillPaddingV * 2).toPx()
         val targetPx = GlidePickerHeight.toPx()
         // The arc's peak — the far slot's centre, plus half a target — and a
         // second row stacked above it.
-        val pickerPx = GlidePickerFarLift * keyPx + targetPx / 2 +
+        val pickerPx = if(reading) keyPx+targetPx*4f+GlidePickerGap.toPx()*3 else GlidePickerFarLift * keyPx + targetPx / 2 +
             if (pickerRows > 1) GlidePickerGap.toPx() + targetPx else 0f
         maxOf(pillHeight.roundToInt() + gapPx, pickerPx.roundToInt())
     }
+    val readingWindowWidth=remember { mutableIntStateOf(gridSize.width) }
+    val readingGridLeft=remember { mutableIntStateOf(0) }
+    val position=remember(headroomPx,reading) {
+        object : PopupPositionProvider {
+            override fun calculatePosition(anchorBounds: IntRect,windowSize: IntSize,layoutDirection: LayoutDirection,popupContentSize: IntSize): IntOffset {
+                if(reading) {
+                    readingWindowWidth.intValue=windowSize.width
+                    readingGridLeft.intValue=anchorBounds.left
+                    return IntOffset(0,anchorBounds.top-headroomPx)
+                }
+                return IntOffset(anchorBounds.left,anchorBounds.top-headroomPx)
+            }
+        }
+    }
     Popup(
-        popupPositionProvider = remember(headroomPx) { GridOverlayPositionProvider(headroomPx) },
+        popupPositionProvider = position,
         properties = PreviewPopupProperties,
     ) {
         Layout(
@@ -23685,6 +24031,7 @@ private fun GlideOverlay(
                         theme = theme,
                         glide = glide,
                         modifier = Modifier.layoutId(index),
+                        reading = reading,
                     )
                 }
                 if (cancelling) {
@@ -23696,7 +24043,7 @@ private fun GlideOverlay(
                 }
             },
         ) { measurables, constraints ->
-            val width = if (gridSize.width > 0) gridSize.width else constraints.maxWidth
+            val width = if(reading) readingWindowWidth.intValue.coerceAtLeast(1) else if (gridSize.width > 0) gridSize.width else constraints.maxWidth
             val height = gridSize.height + headroomPx
             val pill = measurables.firstOrNull { it.layoutId == GlidePillId }?.measure(Constraints())
             val hint = measurables.firstOrNull { it.layoutId == GlideHintId }?.measure(Constraints())
@@ -23704,9 +24051,14 @@ private fun GlideOverlay(
             // three always share a row and five split three and two; a long
             // word ellipsizes rather than pushing its neighbours off the edge.
             val targetMax = ((width - 2 * pickerGapPx) / GlidePickerRowMax).coerceAtLeast(0)
-            val targets = measurables
-                .filter { it.layoutId is Int }
-                .map { it.measure(Constraints(maxWidth = targetMax)) }
+            val targets = measurables.filter { it.layoutId is Int }.map { measurable ->
+                if(reading) {
+                    val index=measurable.layoutId as Int
+                    val control=words[index]=="↶" || words[index]=="↺"
+                    val size=with(density) { (if(control) 40.dp else 72.dp).roundToPx() }.coerceAtMost(width)
+                    measurable.measure(Constraints(minWidth=size,maxWidth=size))
+                } else measurable.measure(Constraints(maxWidth=targetMax))
+            }
             layout(width, height) {
                 if (pill != null) {
                     // The fingertip is read here, in placement, so following
@@ -23719,7 +24071,61 @@ private fun GlideOverlay(
                         .coerceAtLeast(0)
                     pill.place(x, y)
                 }
-                if (targets.isNotEmpty()) {
+                if(reading && targets.isNotEmpty()) {
+                    val origin=readingGridLeft.intValue
+                    val centre=picker.anchorX+origin
+                    val gap=with(density) { 8.dp.toPx() }
+                    val margin=with(density) { 4.dp.toPx() }
+                    val rowHeight=with(density) { GlidePickerHeight.toPx() }
+                    val pitch=with(density) { 80.dp.toPx() }
+                    val controls=words.indices.filter { words[it]=="↶" || words[it]=="↺" }
+                    val readings=words.indices.filterNot { it in controls }
+                    val occupied=mutableListOf<Rect>()
+                    fun placeChoice(index: Int,x: Float,cy: Float) {
+                        val target=targets[index]
+                        val left=(x-target.width/2f).coerceIn(margin,(width-target.width-margin).coerceAtLeast(margin)).toInt()
+                        val top=cy-target.height/2f
+                        val y=(top+headroomPx).toInt().coerceIn(0,(height-target.height).coerceAtLeast(0))
+                        target.place(left,y)
+                        val rect=Rect(left.toFloat(),(y-headroomPx).toFloat(),(left+target.width).toFloat(),(y-headroomPx+target.height).toFloat())
+                        occupied.add(rect)
+                        picker.place(index,Rect(rect.left-origin,rect.top,rect.right-origin,rect.bottom))
+                    }
+                    val exactSlots=readings.isNotEmpty() && readings.all { picker.readingSlots.getOrNull(it) in 0..3 }
+                    if(exactSlots) {
+                        val sizes=readings.map { index -> targets[index].let { it.width.toFloat() to it.height.toFloat() } }
+                        val locations=pinyinFanPositions(
+                            readings.map { picker.readingSlots[it] }, sizes, Offset(centre,picker.anchorY),
+                            width.toFloat(), -headroomPx.toFloat(), gridSize.height.toFloat(),
+                            with(density) { 1.dp.toPx() },
+                        )
+                        readings.forEachIndexed { rank,index ->
+                            placeChoice(index,locations[rank].x,locations[rank].y)
+                        }
+                    } else {
+                    val mainY=picker.anchorY-rowHeight*1.5f-gap*1.5f
+                    readings.forEachIndexed { rank,index ->
+                        val target=targets[index]
+                        var x=centre
+                        var cy=mainY
+                        if(rank==1 || rank==2) {
+                            x=(centre+if(rank==1) -pitch else pitch).coerceIn(target.width/2f+margin,(width-target.width/2f-margin).coerceAtLeast(target.width/2f+margin))
+                            cy=picker.anchorY-rowHeight/2f-margin
+                            if(kotlin.math.abs(x-centre)<target.width/2f+gap) { x=centre;cy=mainY-rowHeight-gap }
+                        } else if(rank>=3) cy=mainY-(rank-2)*(rowHeight+gap)
+                        var rect=Rect(x-target.width/2f,cy-target.height/2f,x+target.width/2f,cy+target.height/2f)
+                        while(occupied.any { it.overlaps(rect) }) {
+                            cy-=rowHeight+gap
+                            rect=Rect(x-target.width/2f,cy-target.height/2f,x+target.width/2f,cy+target.height/2f)
+                        }
+                        placeChoice(index,x,cy)
+                    }
+                    }
+                    val controlDrop=maxOf(with(density) { 48.dp.toPx() },
+                        (occupied.maxOfOrNull { it.bottom } ?: picker.anchorY)-picker.anchorY+gap+
+                            controls.maxOfOrNull { targets[it].height/2f }.let { it ?: 0f })
+                    for(index in controls) placeChoice(index,centre,picker.anchorY+controlDrop)
+                } else if (targets.isNotEmpty()) {
                     val rowHeight = targets.maxOf { it.height }
                     val widths = IntArray(targets.size) { targets[it].width }
                     val leaderRow = pickerLeaderRowCount(widths, pickerGapPx, width)
@@ -23801,7 +24207,7 @@ private fun GlideOverlay(
                 if (hint != null) {
                     // Over the anchor: the finger has left it, heading down, so
                     // nothing covers it there.
-                    val x = (picker.anchorX - hint.width / 2f).toInt()
+                    val x = (picker.anchorX + (if(reading) readingGridLeft.intValue else 0) - hint.width / 2f).toInt()
                         .coerceIn(0, (width - hint.width).coerceAtLeast(0))
                     val y = (picker.anchorY + headroomPx - hint.height / 2f).toInt()
                         .coerceIn(0, (height - hint.height).coerceAtLeast(0))
@@ -23935,13 +24341,20 @@ private fun GlidePickerTarget(
     modifier: Modifier,
     /** What [word] expands to when it is a trigger (#205), drawn after it. */
     expansion: String? = null,
+    reading: Boolean = false,
 ) {
+    val controlDescription=when(word) {
+        "↶" -> stringResource(R.string.ime_glide_undo_syllable)
+        "↺" -> stringResource(R.string.ime_glide_retry_syllable)
+        else -> word
+    }
+    val fit=remember(word,reading) { LabelFit() }
     val customFill = glide.wordPreviewBackground?.let { Color(it.toInt()) }
     val fill = customFill ?: theme.popup
     val text = glide.wordPreviewTextColor?.let { Color(it.toInt()) } ?: theme.popupText
     Surface(
-        modifier = modifier
-            .height(GlidePickerHeight)
+        modifier = modifier.semantics { contentDescription=controlDescription }
+            .height(if(reading && (word=="↶" || word=="↺")) 32.dp else GlidePickerHeight)
             .alpha(if (dimmed) GlidePickerDimmedAlpha else 1f),
         // A preview colour of the user's own is pressed by leaning it toward
         // its text; the theme's pressed key would be a third colour.
@@ -23966,12 +24379,13 @@ private fun GlidePickerTarget(
                 } else {
                     glideExpansionLabel(word, expansion, text)
                 },
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                fontSize = 18.sp,
+                modifier = Modifier.padding(horizontal = if(reading) 6.dp else 14.dp, vertical = if(reading && (word=="↶" || word=="↺")) 2.dp else 6.dp),
+                fontSize = (if(reading) 16f*fit.scale else 18f).sp,
                 fontWeight = if (hovered) FontWeight.Bold else FontWeight.Medium,
                 maxLines = 1,
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis,
+                onTextLayout = { if(reading) fit.onLayout(it) },
             )
         }
     }
@@ -25110,6 +25524,7 @@ private fun smartHitTarget(
  */
 @Composable
 internal fun rememberCurrentLayout(state: KeyboardUiState): KeyboardLayout = remember(
+    state.pinyinShiftComposing(),
     state.layouts,
     state.layoutMode,
     state.settings,
@@ -25366,7 +25781,7 @@ internal fun currentLayout(state: KeyboardUiState): KeyboardLayout {
             state.secondaryLayoutId?.let { state.layouts.secondaries[it] } ?: state.layouts.letters
         LayoutMode.NAMED ->
             state.namedLayer?.let { state.layouts.named[it] } ?: state.layouts.letters
-    }.withSyllablePreviews(state).withMatraPager(state)
+    }.withPinyinShift(state).withSyllablePreviews(state).withMatraPager(state)
     // The Bottom row settings that move keys: the 🌐 key hidden (#139), put in
     // the slot every layout shares (#310), and traded with the comma. One pass
     // shared with the layout editor, so the grid it shows is the grid drawn here
@@ -25485,6 +25900,8 @@ internal fun currentLayout(state: KeyboardUiState): KeyboardLayout {
     val topRowChoice = state.settings.layoutBehavior.topRowHolds
     val topRowHolds = when {
         state.layoutMode != LayoutMode.LETTERS -> TopRowHolds.DIGITS
+        state.composer === com.wasimaster.wmkeyboard.core.input.composer.CompactPinyinComposer &&
+            numberRowShown(state) -> TopRowHolds.NONE
         topRowChoice != TopRowHolds.AUTO -> topRowChoice
         state.settings.numberRow -> TopRowHolds.NONE
         else -> TopRowHolds.DIGITS
@@ -25748,7 +26165,10 @@ internal fun currentLayout(state: KeyboardUiState): KeyboardLayout {
             }
             if (currencyOnKey != null) mapped = mapped.showingCurrency(currencyOnKey)
             if (stripDigits && mapped.longPress.any { it.isSingleDigit() }) {
-                mapped = mapped.copy(longPress = mapped.longPress.filterNot { it.isSingleDigit() })
+                mapped = mapped.copy(
+                    longPress = mapped.longPress.filterNot { it.isSingleDigit() },
+                    hint = mapped.hint?.filterNot { it.isDigit() }?.takeIf { it.isNotBlank() },
+                )
             }
             // In the digit's place, so 1 on q becomes ! at the front of the
             // popup and the corner hint with it. A key that is a digit itself
@@ -25886,12 +26306,13 @@ internal fun currentLayout(state: KeyboardUiState): KeyboardLayout {
             //
             // A key whose hold runs an action of its own has no popup to join.
             if (mapped.action == KeyAction.Text && mapped.clipboardAction == null && !mapped.hasHoldAction()) {
-                clipboardKeys[mapped.output ?: mapped.label]?.let {
-                    mapped = mapped.copy(
-                        actionAlternates = mapped.actionAlternates + clipboardAlternate(it),
-                        actionAlternatesAt = mapped.actionAlternatesAt ?: clipboardActionAt,
-                    )
-                }
+                val letters=mapped.letters?.map { it.lowercaseChar().toString() } ?: listOf(mapped.output ?: mapped.label)
+                val actions=letters.mapNotNull { letter -> clipboardKeys[letter]?.let { clipboardAlternate(it).copy(sourceLetter=letter) } }.distinctBy { it.action }
+                    .filterNot { addition -> mapped.actionAlternates.any { it.action==addition.action } }
+                if(actions.isNotEmpty()) mapped=mapped.copy(
+                    actionAlternates=mapped.actionAlternates+actions,
+                    actionAlternatesAt=mapped.actionAlternatesAt ?: clipboardActionAt,
+                )
             }
             // Appended rather than prepended, so a layout that authored its own
             // alternates onto the enter key keeps them in the order it wrote
@@ -28188,6 +28609,24 @@ internal class AlternatesHold(
      * the popup from the settings as it composes.
      */
     var classic: Boolean = false
+    var paired: Boolean = false
+    private var preferred=0
+    private var pairedEntries: List<Int> = emptyList()
+    private var symbolHold: AlternatesHold? = null
+    private var symbolIndices: List<Int> = emptyList()
+    fun symbolMenu(delegate: AlternatesHold,indices: List<Int>,letters: List<Int>) {
+        val changed=symbolHold!==delegate
+        paired=true;pairedEntries=letters;symbolHold=delegate;symbolIndices=indices
+        if(changed && selected.intValue>=0) delegate.open()
+        preferred=indices.firstOrNull() ?: letters.firstOrNull() ?: 0
+        if(!steering && selected.intValue>=0) selected.intValue=preferred
+        delegate.cell=cell
+    }
+    fun pairedLetters(enabled: Boolean,indices: List<Int>) {
+        val index=indices.firstOrNull() ?: 0
+        paired=enabled;pairedEntries=indices;preferred=index
+        if(!steering && selected.intValue>=0) selected.intValue=index
+    }
 
     /** Where the finger was when the popup opened, and whether it has left yet. */
     private var anchor: Offset? = null
@@ -28225,11 +28664,12 @@ internal class AlternatesHold(
         // Not the rects: a popup prepared ahead of the long press has already
         // been laid out and reported them, and nothing would report them again.
         // The popup clears them itself when it goes.
-        selected.intValue = 0
+        selected.intValue = preferred
         anchor = null
         steering = false
         aimShift = null
         pointer.value = null
+        symbolHold?.let { it.cell=cell;it.open() }
         gate.open = true
     }
 
@@ -28267,7 +28707,24 @@ internal class AlternatesHold(
             if ((local - start).getDistance() < steerPx) return
             steering = true
         }
-        val shift = if (classic) Offset.Zero else aimShift ?: steeringShift(start)?.also { aimShift = it } ?: Offset.Zero
+        if(paired && pairedEntries.size==2 && symbolHold!=null) {
+            val menu=symbolHold!!
+            menu.cell=cell
+            if(menu.anchor==null) menu.anchor=start
+            menu.steering=true
+            if(local.y>cell.height) {
+                selected.intValue=pairedEntries[if(local.x<cell.width/2f) 0 else 1]
+                pointer.value=null
+                menu.selected.intValue=-1
+                menu.pointer.value=null
+            } else {
+                menu.moveTo(local,reachPx,steerPx)
+                selected.intValue=symbolIndices.getOrNull(menu.selected.intValue) ?: -1
+                pointer.value=null
+            }
+            return
+        }
+        val shift = if (classic || paired) Offset.Zero else aimShift ?: steeringShift(start)?.also { aimShift = it } ?: Offset.Zero
         val index = indexAt(local, reachPx, shift)
         selected.intValue = index
         pointer.value = if (index < 0) null else aimInGrid(local, shift)
@@ -28372,7 +28829,7 @@ internal class AlternatesHold(
      */
     fun indexAt(local: Offset, slopPx: Float, shift: Offset = Offset.Zero): Int {
         val entries = rects
-        if (entries.isEmpty()) return 0
+        if (entries.isEmpty()) return preferred
         val origin = gridOrigin()
         val finger = cell.topLeft + local
         val point = finger + shift
@@ -28491,8 +28948,42 @@ private fun AlternatesPopup(
      * way it does for every key.
      */
     shifted: Boolean = false,
+    entriesOverride: List<AlternateEntry>? = null,
 ) {
     val kb = LocalKbTheme.current
+    val entries=entriesOverride ?: remember(key) { key.alternateEntries() }
+    val pairedIndices=remember(key,entries) {
+        key.letters?.takeIf { it.length==2 }?.map { letter ->
+            entries.indexOfFirst { it is AlternateEntry.Character && it.text.equals(letter.toString(),ignoreCase=true) }
+        }?.takeIf { it.all { index -> index>=0 } }.orEmpty()
+    }
+    val paired=pairedIndices.size==2
+    val pairedGroups=remember(key,entries,pairedIndices) {
+        if(!paired) emptyList() else {
+            val letters=key.letters.orEmpty().lowercase()
+            val chineseSymbols=letters.map { com.wasimaster.wmkeyboard.core.layout.pinyinLetterAlternates(it) }
+            val englishSymbols=letters.map { letter ->
+                BuiltInLayouts.QWERTY.layers[LayoutLayer.LETTERS.key]?.rows.orEmpty().flatten()
+                    .firstOrNull { (it.output ?: it.label).equals(letter.toString(),ignoreCase=true) }?.longPress.orEmpty()
+            }
+            val isChinese=entries.any { it is AlternateEntry.Character && it.text in listOf("（","）","“","”","：","；","！","？","¥") } ||
+                entries.filterIsInstance<AlternateEntry.Character>().all { entry -> entry.text in letters.map { it.toString() } || chineseSymbols.any { entry.text in it } }
+            val symbols=if(isChinese) chineseSymbols else englishSymbols
+            val groups=List(2) { mutableListOf<Int>() }
+            entries.forEachIndexed { index,entry -> if(index !in pairedIndices) {
+                val owner=when(entry) {
+                    is AlternateEntry.Action -> letters.indexOf(entry.alternate.sourceLetter?.firstOrNull() ?: '\u0000')
+                    is AlternateEntry.Character -> symbols.indexOfFirst { entry.text in it }
+                }
+                groups[if(owner in 0..1) owner else if(groups[0].size<=groups[1].size) 0 else 1].add(index)
+            } }
+            groups
+        }
+    }
+    if(paired) {
+        PairedKeyAlternatesPopup(key,entries,pairedIndices,pairedGroups,visible,growMs,popupPosition,popup,hold,shifted,onDismiss,onText,onAction)
+        return
+    }
     val mirrorBrackets = LocalMirrorBrackets.current
     val configuration = LocalConfiguration.current
     val classic = popup.alternatesClassic
@@ -28746,7 +29237,7 @@ private fun AlternatesPopup(
             ) {
                 // One list, so the drawn order and the index the hold commits
                 // are the same statement rather than two that have to agree.
-                key.alternateEntries().forEachIndexed { index, entry ->
+                entries.forEachIndexed { index, entry ->
                     when (entry) {
                         is AlternateEntry.Character -> AlternateCharacter(
                             text = rtlMirrored(visibleAlternate(shiftCased(entry.text, shifted)), mirrorBrackets),
@@ -28774,6 +29265,51 @@ private fun AlternatesPopup(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PairedKeyAlternatesPopup(
+    key: Key,entries: List<AlternateEntry>,letters: List<Int>,groups: List<List<Int>>,
+    visible: Boolean,growMs: Int,popupPosition: PopupPositionProvider,popup: KeyPopupSettings,
+    hold: AlternatesHold?,shifted: Boolean,onDismiss: () -> Unit,onText: (String) -> Unit,onAction: (Key) -> Unit,
+) {
+    val kb=LocalKbTheme.current
+    val symbols=groups.flatten().ifEmpty { entries.indices.filterNot { it in letters } }
+    val menuHold=remember(hold,key) { if(hold==null) null else AlternatesHold() }
+    if(menuHold!=null && hold!=null) hold.symbolMenu(menuHold,symbols,letters)
+    DisposableEffect(hold,menuHold) { onDispose { menuHold?.cancel() } }
+    AlternatesPopup(
+        key=key.copy(letters=null),visible=visible,growMs=growMs,popupPosition=popupPosition,popup=popup,
+        onDismiss=onDismiss,onText=onText,onAction=onAction,hold=menuHold,shifted=shifted,
+        entriesOverride=symbols.map { entries[it] },
+    )
+    val gap=with(LocalDensity.current) { 4.dp.roundToPx() }
+    val letterWidth=maxOf(44f,18f*popup.alternatesFontScale*1.4f+popup.alternatesPaddingDp*2).dp
+    letters.forEachIndexed { side,index ->
+        val position=remember(side,gap) { object: PopupPositionProvider {
+            override fun calculatePosition(anchorBounds: IntRect,windowSize: IntSize,layoutDirection: LayoutDirection,popupContentSize: IntSize): IntOffset {
+                val groupWidth=popupContentSize.width*2+gap
+                val left=(anchorBounds.center.x-groupWidth/2).coerceIn(gap,(windowSize.width-gap-groupWidth).coerceAtLeast(gap))
+                val wanted=left+side*(popupContentSize.width+gap)
+                return IntOffset(wanted,
+                    (anchorBounds.bottom+gap).coerceAtMost((windowSize.height-popupContentSize.height).coerceAtLeast(0)))
+            }
+        } }
+        Popup(popupPositionProvider=position,onDismissRequest=onDismiss,
+            properties=if(visible) AlternatesShownProperties else AlternatesHiddenProperties) {
+            Surface(modifier=Modifier.graphicsLayer { alpha=if(visible) 1f else 0f }
+                .frostGlass(kb,kb.popupShape(),FrostSurface.POPUPS).popupDressingOnly(kb,kb.popupShape()),
+                shape=kb.popupShape(),color=kb.popupSurfaceColor(),border=kb.popupSurfaceBorder(),shadowElevation=elevationFor(kb.popupShapeKind,8.dp)) {
+                val text=(entries[index] as AlternateEntry.Character).text
+                Box(Modifier.width(letterWidth).heightIn(min=44.dp)
+                    .background(if(hold?.selected?.intValue==index) kb.popupSelected else Color.Transparent)
+                    .clickable { onText(text) },contentAlignment=Alignment.Center) {
+                    AlternateCharacter(visibleAlternate(shiftCased(text,shifted)),index,hold,(18*popup.alternatesFontScale).sp,
+                        Modifier.alternatePadding(popup.alternatesPaddingDp.dp))
                 }
             }
         }
@@ -30562,6 +31098,8 @@ private fun KeyContent(visual: KeyVisual, settings: KeyboardSettings, contentCol
                     fontSize = (baseSize * fontScale * (if (strip) 1f else fit.scale)).sp,
                     fontWeight = if (visual.bold ?: settings.accessibility.boldLabels) {
                         FontWeight.Bold
+                    } else if(LocalThinLatinKeyLabels.current && text.any { it.isLetter() } && text.all { it.code<256 }) {
+                        FontWeight.Normal
                     } else {
                         FontWeight.Medium
                     },
@@ -31504,6 +32042,10 @@ internal fun spaceSwipeKey(press: KeyAlternate): Key =
  * 🌐 key (issue #139) with neither slot set to the language switch does, and
  * that setting's info text tells the user which swipe brings switching back.
  */
+/** A deliberate upward stroke owns its hold while it travels to the pad threshold. */
+internal fun spaceUpOwnsHold(up: SpaceSwipeUp, dx: Float, dy: Float, slop: Float): Boolean =
+    up != SpaceSwipeUp.NONE && -dy > maxOf(abs(dx), slop)
+
 internal fun spaceHoldOpensPicker(
     enabledLayoutCount: Int,
     holdOpensAlternates: Boolean,
@@ -32094,6 +32636,9 @@ private fun Modifier.pointerInputKey(
                             // same debounce the touchpad waits for.
                             // Or the action bound to the swipe up (competitor gap
                             // list item 3), the same distance, run at the lift.
+                            if (spaceUpOwnsHold(textEditing.spaceSwipeUp, totalDx, totalDy, slopPx)) {
+                                holdJob?.cancel()
+                            }
                             val upPress = textEditing.spaceSwipeUp
                                 .pressedAction(textEditing.spaceSwipeBinding(SpaceSwipeSlot.UP))
                             if (upPress != null && -totalDy > abs(totalDx)) {

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ime_glide_reading_evidence">Relative weight %1$d · offset %2$d%% key width</string>
+    <string name="ime_glide_reading_neighbour">Nearby key</string>
+    <string name="ime_glide_reading_edit">Choose syllables again</string>
+    <string name="ime_glide_reading_more">More nearby readings</string>
+</resources>

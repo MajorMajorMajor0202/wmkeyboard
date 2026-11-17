@@ -1,0 +1,5 @@
+<resources>
+    <string name="ime_one_handed_resize_desc">调整键盘大小和位置</string>
+    <string name="ime_resize_one_handed_move_desc">拖动以移动键盘</string>
+    <string name="ime_resize_match_normal_height">与普通键盘等高</string>
+</resources>

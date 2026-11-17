@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="languages_double_pinyin_literal_finals_title">相容零聲母原拼</string>
+    <string name="languages_double_pinyin_literal_finals_subtitle">直接輸入 an、en，同時保留方案原編碼。這兩組按鍵優先按原拼解釋。</string>
+</resources>

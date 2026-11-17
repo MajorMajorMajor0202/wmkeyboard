@@ -1590,6 +1590,7 @@ sealed interface SizingAction {
         val fullWidthBars: Boolean? = null,
         /** The toolbar handle (#1261): the bar's height apart from the keys'. */
         val toolbarHeightDp: Int? = null,
+        val oneHandedProfile: com.wasimaster.wmkeyboard.core.settings.OneHandedProfile? = null,
     ) : SizingAction
 
     /** Leave the inline resize tool without persisting anything. */
@@ -3696,6 +3697,7 @@ data class KeyboardUiState(
      * composer but T9 pinyin, and once every syllable is settled.
      */
     val conversionReadings: List<String> = emptyList(),
+    val conversionReadingHints: Map<String, ConversionReadingHint> = emptyMap(),
     /**
      * Desktop Avro's candidate list for the word being typed, for the row
      * above the strip; empty unless the phonetic language is set to show it
@@ -3835,6 +3837,7 @@ data class KeyboardUiState(
      * populated puts them under the fingertip to pick from.
      */
     val glideChoices: List<String> = emptyList(),
+    val pinyinGlidePreview: com.wasimaster.wmkeyboard.ime.ui.PinyinGlidePreview? = null,
     /**
      * Whether the latest preview's leader barely beats its runner-up under
      * the user's [GestureSettings.pickerSensitivity]. Drives the short dwell;
@@ -3873,6 +3876,8 @@ data class KeyboardUiState(
      */
     val sentenceOpeners: List<String> = emptyList(),
     val composingPreview: String = "",
+    /** Reading in the currently focused keyboard-owned conversion field. */
+    val captureReading: String = "",
     /**
      * A word is being typed into the service's own buffer: the Latin path,
      * which composes in the field and so leaves [composingPreview] empty.
@@ -5652,3 +5657,10 @@ data class ToolTextEntries(
      */
     val snippetAsk: SnippetAskEntry? = null,
 )
+
+/** Relative ranking evidence, not a calibrated probability. Offset is in physical key widths. */
+data class ConversionReadingHint(val weight: Float, val deviation: Float, val neighbour: Boolean, val selected: Boolean = false)
+
+internal const val EditGlideReading = "@glide:edit"
+
+internal const val UndoReadingSelection="@glide:undo-reading"

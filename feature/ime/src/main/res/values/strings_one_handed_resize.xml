@@ -1,0 +1,5 @@
+<resources>
+    <string name="ime_one_handed_resize_desc">Adjust keyboard size and position</string>
+    <string name="ime_resize_one_handed_move_desc">Drag to move the keyboard</string>
+    <string name="ime_resize_match_normal_height">Match normal keyboard height</string>
+</resources>

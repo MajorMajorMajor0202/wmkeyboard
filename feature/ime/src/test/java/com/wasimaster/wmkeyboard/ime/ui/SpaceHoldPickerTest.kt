@@ -1,5 +1,6 @@
 package com.wasimaster.wmkeyboard.ime.ui
 
+import com.wasimaster.wmkeyboard.core.settings.SpaceSwipeUp
 import com.wasimaster.wmkeyboard.core.settings.SpaceSwipeAction
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -15,6 +16,14 @@ import org.junit.Test
  * answer to "may the chooser take this hold".
  */
 class SpaceHoldPickerTest {
+    @Test fun `upward pad motion prevents the language hold stealing the stroke`() {
+        assertTrue(spaceUpOwnsHold(SpaceSwipeUp.TOUCHPAD, 2f, -25f, 10f))
+        assertFalse(spaceUpOwnsHold(SpaceSwipeUp.TOUCHPAD, 2f, -5f, 10f))
+        assertFalse(spaceUpOwnsHold(SpaceSwipeUp.TOUCHPAD, 30f, -25f, 10f))
+        assertFalse(spaceUpOwnsHold(SpaceSwipeUp.NONE, 2f, -25f, 10f))
+        assertFalse(spaceUpOwnsHold(SpaceSwipeUp.TOUCHPAD, 0f, 0f, 10f))
+    }
+
 
     @Test
     fun `a hold slot set to the cursor keeps the chooser off the hold`() {

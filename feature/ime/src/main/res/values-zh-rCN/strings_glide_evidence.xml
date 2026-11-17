@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ime_glide_reading_evidence">相对权重 %1$d · 偏移 %2$d%% 键宽</string>
+    <string name="ime_glide_reading_neighbour">邻近按键备选</string>
+    <string name="ime_glide_reading_edit">重新逐音节选择</string>
+    <string name="ime_glide_reading_more">更多邻近拼音</string>
+</resources>

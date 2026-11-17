@@ -1290,7 +1290,11 @@ private fun SnippetGroup(
     // Deleting down to one snippet takes the pencil away, so the flag has to
     // come down with it or adding a second would land straight back in a mode
     // nothing on screen is offering to leave.
-    val canEdit = snippets.size > 1
+    var page by rememberSaveable(title) { mutableStateOf(0) }
+    val pages = snippetPageCount(snippets.size)
+    val safePage = page.coerceIn(0, pages - 1)
+    val shown = snippetPage(snippets, safePage)
+    val canEdit = shown.size > 1
     LaunchedEffect(canEdit) { if (!canEdit) editing = false }
     SettingsGroup(
         title,
@@ -1317,15 +1321,13 @@ private fun SnippetGroup(
         if (editing && canEdit) {
             item {
                 ReorderableColumn(
-                    snippets,
+                    shown,
                     label = { it.label },
-                    onReorder = onReorder,
+                    onReorder = { ordered -> onReorder(reorderedSnippetPage(snippets, ordered)) },
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
             }
-            return@SettingsGroup
-        }
-        for (snippet in snippets) {
+        } else for (snippet in shown) {
             // Keyed on the snippet, not on its place in the list: the swipe
             // state below is remembered per composition slot, and without
             // this the row that slides up into a deleted row's place would
@@ -1337,6 +1339,18 @@ private fun SnippetGroup(
                     onEdit = { onOpen(snippet) },
                     onDelete = { onDelete(snippet) },
                 )
+            }
+        }
+        if (pages > 1) item(key = "snippet-page-controls") {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                TextButton(enabled = safePage > 0, onClick = { page = safePage - 1 }) {
+                    Text(stringResource(R.string.expander_page_previous))
+                }
+                Text(stringResource(R.string.expander_page_number, safePage + 1, pages))
+                TextButton(enabled = safePage + 1 < pages, onClick = { page = safePage + 1 }) {
+                    Text(stringResource(R.string.expander_page_next))
+                }
             }
         }
     }

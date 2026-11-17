@@ -46,6 +46,11 @@ sealed interface GlideVerdict {
      * The finger lifted in the picker's cancel zone. Nothing commits, nothing
      * is learned; the service only retires the stroke's previews.
      */
+    /** Confirmed prefix syllables compose live; preview choices remain unconfirmed. */
+    data class Pinyin(val prefix: List<PinyinGlideChoice> = emptyList(),val preview: Boolean = false,
+        val picked: PinyinGlideChoice? = null,val rawTail: String? = null,
+        val strokeId: Long = 0L) : GlideVerdict
+
     data object Cancel : GlideVerdict
 }
 

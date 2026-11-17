@@ -685,20 +685,24 @@ enum class OneHandedSide {
  *
  * [widthPercent] is the keyboard's share of the screen width while
  * one-handed is active (the rail and any leftover fill the rest).
- * [heightScale] shrinks the keys vertically as a percent of their normal
- * height, bringing the top rows into thumb reach. [side] is the edge the
+ * [heightScale] scales the keys vertically as a percent of their normal
+ * height. [side] is the edge the
  * keyboard docks to when one-handed is enabled in this orientation; the
  * in-keyboard rail's flip button updates it live.
  */
 data class OneHandedProfile(
-    val widthPercent: Int = 78,
+    val widthPercent: Int = 85,
     val heightScale: Int = 100,
     val side: OneHandedSide = OneHandedSide.RIGHT,
+    /** Position within the remaining width; null retains the chosen dock side. */
+    val positionPercent: Int? = null,
+    /** One-handed vertical position, independent of the full-width board. */
+    val bottomPaddingDp: Int? = null,
 )
 
 /**
  * Per-orientation one-handed tuning. Landscape defaults narrower because a
- * landscape keyboard is very wide, so 78% would barely help thumb reach.
+ * landscape keyboard is very wide, so the portrait width would barely help thumb reach.
  */
 data class OneHandedSettings(
     val portrait: OneHandedProfile = OneHandedProfile(),
@@ -6654,6 +6658,16 @@ data class CjkSettings(
     val pinyinFuzzyPairs: Set<String> = PinyinFuzzy.ALL_PAIRS,
     /** Chinese: the Double Pinyin scheme, or OFF for full pinyin. */
     val pinyinDoublePinyin: DoublePinyinScheme = DoublePinyinScheme.OFF,
+    val pinyinDoublePinyinSyllableDelete: Boolean = false,
+    val pinyinEnterDoubleTap: Boolean = true,
+    val pinyinDoublePinyinRawLetters: Boolean = false,
+    val pinyinDoublePinyinLiteralFinals: Boolean = false,
+    val pinyinCompactStyle: Boolean = false,
+    /** Legacy profile field, ignored: each compact style defines its own L/M geometry. */
+    val pinyinLargeLM: Boolean = false,
+    /** 0: off, 1: dwell choices, 2: confirm each two-key syllable. */
+    val pinyinGlideMode: Int = 1,
+    val pinyinGlidePopupLimit: Int = 12,
     /**
      * Chinese: the user's own Double Pinyin scheme, as text in fcitx's sp.dat
      * format (see `DoublePinyinProfile`), typed with when [pinyinDoublePinyin]
@@ -12975,7 +12989,15 @@ class SettingsRepository(private val context: Context) {
         private val PINYIN_SHORTCUTS = booleanPreferencesKey("pinyin_shortcuts")
         private val PINYIN_PREDICTION = booleanPreferencesKey("pinyin_prediction")
         private val PINYIN_FUZZY_PAIRS = stringSetPreferencesKey("pinyin_fuzzy_pairs")
+        private val PINYIN_ENTER_DOUBLE_TAP = booleanPreferencesKey("pinyin_enter_double_tap")
+        private val PINYIN_DOUBLE_PINYIN_LITERAL_FINALS = booleanPreferencesKey("pinyin_double_pinyin_literal_finals")
+        private val PINYIN_DOUBLE_PINYIN_RAW_LETTERS = booleanPreferencesKey("pinyin_double_pinyin_raw_letters")
         private val PINYIN_DOUBLE_PINYIN = stringPreferencesKey("pinyin_double_pinyin")
+        private val PINYIN_DOUBLE_PINYIN_SYLLABLE_DELETE = booleanPreferencesKey("pinyin_double_pinyin_syllable_delete")
+        private val PINYIN_COMPACT_STYLE = booleanPreferencesKey("pinyin_compact_style")
+        private val PINYIN_LARGE_LM = booleanPreferencesKey("pinyin_large_lm")
+        private val PINYIN_GLIDE_MODE = intPreferencesKey("pinyin_glide_mode")
+        private val PINYIN_GLIDE_POPUP_LIMIT = intPreferencesKey("pinyin_glide_popup_limit")
         private val PINYIN_DOUBLE_PINYIN_CUSTOM = stringPreferencesKey("pinyin_double_pinyin_custom")
         private val CJK_TRADITIONAL_OUTPUT = booleanPreferencesKey("cjk_traditional_output")
         private val CJK_TRADITIONAL_BUTTON = booleanPreferencesKey("cjk_traditional_button")
@@ -13001,11 +13023,11 @@ class SettingsRepository(private val context: Context) {
         // Device-local with the rest of one-handed mode (the "one_handed_" sync prefix).
         private val ONE_HANDED_LAYOUT = stringPreferencesKey("one_handed_layout")
         // One-handed width leaves room for the rail on the inner edge, so it is
-        // capped below 100%. Height scale never grows the keys, only shrinks.
-        const val ONE_HANDED_WIDTH_MIN = 40
-        const val ONE_HANDED_WIDTH_MAX = 85
+        // capped below 100%. Height can shrink or grow without changing the normal board.
+        const val ONE_HANDED_WIDTH_MIN = 30
+        const val ONE_HANDED_WIDTH_MAX = 95
         const val ONE_HANDED_HEIGHT_SCALE_MIN = 60
-        const val ONE_HANDED_HEIGHT_SCALE_MAX = 100
+        const val ONE_HANDED_HEIGHT_SCALE_MAX = 150
         // Docked sizing limits, shared by the sliders and the inline resize
         // tool so a drag can never store what a slider could not.
         const val KEY_HEIGHT_MIN_DP = 32
@@ -13019,6 +13041,10 @@ class SettingsRepository(private val context: Context) {
             intPreferencesKey("one_handed_height_scale_${if (landscape) "landscape" else "portrait"}")
         private fun oneHandedSideKey(landscape: Boolean) =
             stringPreferencesKey("one_handed_side_${if (landscape) "landscape" else "portrait"}")
+        private fun oneHandedPositionKey(landscape: Boolean) =
+            intPreferencesKey("one_handed_position_${if (landscape) "landscape" else "portrait"}")
+        private fun oneHandedBottomKey(landscape: Boolean) =
+            intPreferencesKey("one_handed_bottom_${if (landscape) "landscape" else "portrait"}")
         private val LEARN_FROM_TYPING = booleanPreferencesKey("learn_from_typing")
         private val ADD_WORDS_TO_SYSTEM_DICTIONARY =
             booleanPreferencesKey("add_words_to_system_dictionary")
@@ -15214,6 +15240,13 @@ class SettingsRepository(private val context: Context) {
             pinyinDoublePinyin = p[PINYIN_DOUBLE_PINYIN]
                 ?.let { runCatching { DoublePinyinScheme.valueOf(it) }.getOrNull() }
                 ?: defaults.cjk.pinyinDoublePinyin,
+            pinyinEnterDoubleTap = p[PINYIN_ENTER_DOUBLE_TAP] ?: defaults.cjk.pinyinEnterDoubleTap,
+            pinyinDoublePinyinLiteralFinals = p[PINYIN_DOUBLE_PINYIN_LITERAL_FINALS] ?: defaults.cjk.pinyinDoublePinyinLiteralFinals,
+            pinyinDoublePinyinRawLetters = p[PINYIN_DOUBLE_PINYIN_RAW_LETTERS] ?: defaults.cjk.pinyinDoublePinyinRawLetters,
+            pinyinDoublePinyinSyllableDelete = p[PINYIN_DOUBLE_PINYIN_SYLLABLE_DELETE] ?: defaults.cjk.pinyinDoublePinyinSyllableDelete,
+            pinyinCompactStyle = p[PINYIN_COMPACT_STYLE] ?: false,
+            pinyinGlideMode = (p[PINYIN_GLIDE_MODE] ?: 1).coerceIn(0,2),
+            pinyinGlidePopupLimit = (p[PINYIN_GLIDE_POPUP_LIMIT] ?: 12).coerceIn(4,24),
             pinyinDoublePinyinCustom = p[PINYIN_DOUBLE_PINYIN_CUSTOM] ?: defaults.cjk.pinyinDoublePinyinCustom,
             traditionalOutput = p[CJK_TRADITIONAL_OUTPUT] ?: defaults.cjk.traditionalOutput,
             traditionalButton = p[CJK_TRADITIONAL_BUTTON] ?: defaults.cjk.traditionalButton,
@@ -24760,6 +24793,24 @@ class SettingsRepository(private val context: Context) {
     suspend fun resetPinyinFuzzyPairs() =
         editPrefs { it.remove(PINYIN_FUZZY_PAIRS) }
 
+    suspend fun setPinyinCompactStyle(value: Boolean) = editPrefs { it[PINYIN_COMPACT_STYLE] = value }
+    suspend fun setPinyinLargeLM(value: Boolean) = editPrefs { it[PINYIN_LARGE_LM] = value }
+    suspend fun setPinyinGlideMode(value: Int) = editPrefs { it[PINYIN_GLIDE_MODE] = value.coerceIn(0,2) }
+    suspend fun setPinyinGlidePopupLimit(value: Int) = editPrefs { it[PINYIN_GLIDE_POPUP_LIMIT] = value.coerceIn(4,24) }
+
+    suspend fun setPinyinEnterDoubleTap(value: Boolean) {
+        editPrefs { it[PINYIN_ENTER_DOUBLE_TAP] = value }
+    }
+    suspend fun setPinyinDoublePinyinLiteralFinals(value: Boolean) {
+        editPrefs { it[PINYIN_DOUBLE_PINYIN_LITERAL_FINALS] = value }
+    }
+
+    suspend fun setPinyinDoublePinyinRawLetters(value: Boolean) {
+        editPrefs { it[PINYIN_DOUBLE_PINYIN_RAW_LETTERS] = value }
+    }
+    suspend fun setPinyinDoublePinyinSyllableDelete(value: Boolean) =
+        editPrefs { it[PINYIN_DOUBLE_PINYIN_SYLLABLE_DELETE] = value }
+
     suspend fun setPinyinDoublePinyin(value: DoublePinyinScheme) =
         editPrefs { it[PINYIN_DOUBLE_PINYIN] = value.name }
 
@@ -24838,7 +24889,21 @@ class SettingsRepository(private val context: Context) {
         }
 
     suspend fun setOneHandedSide(landscape: Boolean, value: OneHandedSide) =
-        editPrefs { it[oneHandedSideKey(landscape)] = value.name }
+        editPrefs {
+            it[oneHandedSideKey(landscape)] = value.name
+            it.remove(oneHandedPositionKey(landscape))
+        }
+
+    /** Commit the resize tool's complete one-handed geometry atomically. */
+    suspend fun setOneHandedProfile(landscape: Boolean, value: OneHandedProfile) = editPrefs {
+        it[oneHandedWidthKey(landscape)] = value.widthPercent.coerceIn(ONE_HANDED_WIDTH_MIN, ONE_HANDED_WIDTH_MAX)
+        it[oneHandedHeightScaleKey(landscape)] = value.heightScale.coerceIn(ONE_HANDED_HEIGHT_SCALE_MIN, ONE_HANDED_HEIGHT_SCALE_MAX)
+        it[oneHandedSideKey(landscape)] = value.side.name
+        value.positionPercent?.let { position -> it[oneHandedPositionKey(landscape)] = position.coerceIn(0, 100) }
+            ?: it.remove(oneHandedPositionKey(landscape))
+        value.bottomPaddingDp?.let { padding -> it[oneHandedBottomKey(landscape)] = padding.coerceIn(0, MAX_BOTTOM_PADDING_DP) }
+            ?: it.remove(oneHandedBottomKey(landscape))
+    }
 
     suspend fun setOneHandedPortraitOnly(value: Boolean) =
         editPrefs { it[ONE_HANDED_PORTRAIT_ONLY] = value }
@@ -24867,6 +24932,8 @@ class SettingsRepository(private val context: Context) {
             widthPercent = p[oneHandedWidthKey(landscape)] ?: default.widthPercent,
             heightScale = p[oneHandedHeightScaleKey(landscape)] ?: default.heightScale,
             side = side,
+            positionPercent = p[oneHandedPositionKey(landscape)] ?: default.positionPercent,
+            bottomPaddingDp = p[oneHandedBottomKey(landscape)] ?: default.bottomPaddingDp,
         )
     }
 

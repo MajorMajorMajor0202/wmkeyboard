@@ -21,6 +21,10 @@ class RankCache<T> {
     @Volatile
     private var entry: Entry<T>? = null
 
+    fun peek(buffer: String): T? = entry?.takeIf {
+        it.buffer == buffer && it.generation == CjkDictionaries.generation
+    }?.value
+
     fun get(buffer: String, compute: () -> T): T {
         val hit = entry
         val generation = CjkDictionaries.generation

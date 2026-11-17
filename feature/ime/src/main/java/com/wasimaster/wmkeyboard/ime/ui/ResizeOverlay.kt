@@ -65,6 +65,9 @@ import com.wasimaster.wmkeyboard.core.settings.ScreenVariant
 import com.wasimaster.wmkeyboard.core.settings.SettingsRepository
 import com.wasimaster.wmkeyboard.core.settings.SidePadScaleRange
 import com.wasimaster.wmkeyboard.core.settings.ToolbarHeightRange
+import com.wasimaster.wmkeyboard.core.settings.OneHandedProfile
+import com.wasimaster.wmkeyboard.core.settings.bounds
+import com.wasimaster.wmkeyboard.core.settings.oneHandedModeFor
 import com.wasimaster.wmkeyboard.ime.KeyboardUiState
 import com.wasimaster.wmkeyboard.ime.R
 import com.wasimaster.wmkeyboard.ime.SizingAction
@@ -131,6 +134,10 @@ internal class ResizeSession(
     val toolbarResizable: Boolean = true,
     /** Bar rows the toolbar height applies to: two with the tools on a row of their own. */
     val barRows: Int = 1,
+    val oneHanded: Boolean = false,
+    val onMatchNormalHeight: (() -> Unit)? = null,
+    val keyHeightRange: IntRange = SettingsRepository.KEY_HEIGHT_MIN_DP..SettingsRepository.KEY_HEIGHT_MAX_DP,
+    val numberHeightRange: IntRange = SettingsRepository.KEY_HEIGHT_MIN_DP..SettingsRepository.KEY_HEIGHT_MAX_DP,
 ) {
     val reservedPx: MutableIntState = mutableIntStateOf(0)
     val entryPx: MutableIntState = mutableIntStateOf(0)
@@ -143,11 +150,15 @@ internal class ResizeSession(
  * so both heights keep their ratio and re-derive from one clean baseline every
  * frame (accumulating per-frame deltas drifts).
  */
-internal fun resizeScaledHeights(start: ResizeValues, frac: Float): ResizeValues = start.copy(
+internal fun resizeScaledHeights(
+    start: ResizeValues, frac: Float,
+    keyRange: IntRange = SettingsRepository.KEY_HEIGHT_MIN_DP..SettingsRepository.KEY_HEIGHT_MAX_DP,
+    numberRange: IntRange = SettingsRepository.KEY_HEIGHT_MIN_DP..SettingsRepository.KEY_HEIGHT_MAX_DP,
+): ResizeValues = start.copy(
     keyHeightDp = (start.keyHeightDp * frac).roundToInt()
-        .coerceIn(SettingsRepository.KEY_HEIGHT_MIN_DP, SettingsRepository.KEY_HEIGHT_MAX_DP),
+        .coerceIn(keyRange),
     numberRowHeightDp = (start.numberRowHeightDp * frac).roundToInt()
-        .coerceIn(SettingsRepository.KEY_HEIGHT_MIN_DP, SettingsRepository.KEY_HEIGHT_MAX_DP),
+        .coerceIn(numberRange),
 )
 
 /**
@@ -195,12 +206,68 @@ internal fun resizeBottomEdgeBy(
  * of the window width, positive = right = more pad). Clamped to the same
  * range the settings slider allows.
  */
-internal fun resizeLeftPaddedBy(start: ResizeValues, dxFrac: Float): ResizeValues =
-    start.copy(sidePadLeft = (start.sidePadLeft + dxFrac).coerceIn(SidePadScaleRange))
+internal fun resizeLeftPaddedBy(start: ResizeValues, dxFrac: Float, oneHanded: Boolean = false): ResizeValues =
+    start.copy(sidePadLeft = if (oneHanded) {
+        (start.sidePadLeft + dxFrac).coerceIn((0.05f - start.sidePadRight).coerceAtLeast(0f), 0.70f - start.sidePadRight)
+    } else (start.sidePadLeft + dxFrac).coerceIn(SidePadScaleRange))
 
 /** Right pad after a right-handle drag: finger moving right *shrinks* it. */
-internal fun resizeRightPaddedBy(start: ResizeValues, dxFrac: Float): ResizeValues =
-    start.copy(sidePadRight = (start.sidePadRight - dxFrac).coerceIn(SidePadScaleRange))
+internal fun resizeRightPaddedBy(start: ResizeValues, dxFrac: Float, oneHanded: Boolean = false): ResizeValues =
+    start.copy(sidePadRight = if (oneHanded) {
+        (start.sidePadRight - dxFrac).coerceIn((0.05f - start.sidePadLeft).coerceAtLeast(0f), 0.70f - start.sidePadLeft)
+    } else (start.sidePadRight - dxFrac).coerceIn(SidePadScaleRange))
+
+internal fun resizeOneHandedMovedBy(start: ResizeValues, dxFrac: Float): ResizeValues {
+    val slack = start.sidePadLeft + start.sidePadRight
+    val left = (start.sidePadLeft + dxFrac).coerceIn(0f, slack)
+    return start.copy(sidePadLeft = left, sidePadRight = slack - left)
+}
+
+internal fun oneHandedHeightRange(height: Int, scale: Int): IntRange =
+    (height * SettingsRepository.ONE_HANDED_HEIGHT_SCALE_MIN / scale.toFloat()).roundToInt().coerceAtLeast(1)..
+        (height * SettingsRepository.ONE_HANDED_HEIGHT_SCALE_MAX / scale.toFloat()).roundToInt().coerceAtLeast(1)
+
+internal fun resizeOneHandedBottomEdgeBy(
+    start: ResizeValues, dyDp: Float, baseGridDp: Float, maxPad: Int,
+    keyRange: IntRange, numberRange: IntRange, gridDp: (ResizeValues) -> Float,
+): ResizeValues {
+    if (baseGridDp <= 0f) return start
+    val travel = dyDp.coerceIn((start.bottomPaddingDp - maxPad).toFloat(), start.bottomPaddingDp.toFloat())
+    val scaled = resizeScaledHeights(start, (baseGridDp + travel) / baseGridDp, keyRange, numberRange)
+    val grown = gridDp(scaled) - baseGridDp
+    return scaled.copy(bottomPaddingDp = (start.bottomPaddingDp - grown).roundToInt().coerceIn(0, maxPad))
+}
+
+internal fun oneHandedResizeCommit(
+    variant: ScreenVariant, entry: ResizeValues, result: ResizeValues?, profile: OneHandedProfile,
+): SizingAction {
+    val action = resizeCommitAction(variant, entry, result)
+    if (result == null || action !is SizingAction.ResizeCommit) return action
+    val slack = (result.sidePadLeft + result.sidePadRight).coerceAtLeast(0.0001f)
+    return action.copy(
+        keyHeightDp = null, numberRowHeightDp = null, bottomPaddingDp = null,
+        sidePadLeftScale = null, sidePadRightScale = null, fullWidthBars = null,
+        oneHandedProfile = profile.copy(
+            widthPercent = ((1f - slack) * 100).roundToInt().coerceIn(30, 95),
+            positionPercent = if (result.sidePadLeft == entry.sidePadLeft && result.sidePadRight == entry.sidePadRight) {
+                profile.positionPercent
+            } else (result.sidePadLeft / slack * 100).roundToInt().coerceIn(0, 100),
+            heightScale = (profile.heightScale * result.keyHeightDp.toFloat() / entry.keyHeightDp).roundToInt()
+                .coerceIn(SettingsRepository.ONE_HANDED_HEIGHT_SCALE_MIN, SettingsRepository.ONE_HANDED_HEIGHT_SCALE_MAX),
+            bottomPaddingDp = if (result.bottomPaddingDp == entry.bottomPaddingDp) profile.bottomPaddingDp else result.bottomPaddingDp,
+        ),
+    )
+}
+
+/** Exact 100% avoids trying to invert rounded rendered key heights by dragging. */
+internal fun oneHandedMatchNormalHeight(
+    variant: ScreenVariant, entry: ResizeValues, result: ResizeValues?, profile: OneHandedProfile,
+): SizingAction.ResizeCommit {
+    val action = if (result == null) {
+        SizingAction.ResizeCommit(variant, null, null, null, oneHandedProfile = profile)
+    } else oneHandedResizeCommit(variant, entry, result, profile) as SizingAction.ResizeCommit
+    return action.copy(oneHandedProfile = action.oneHandedProfile!!.copy(heightScale = 100, bottomPaddingDp = null))
+}
 
 /**
  * The toolbar height after a bar-handle drag of [dyDp] (positive = down), for
@@ -220,9 +287,9 @@ internal fun resizeToolbarAtLimit(values: ResizeValues): Boolean =
     values.toolbarHeightDp <= ToolbarHeightRange.first || values.toolbarHeightDp >= ToolbarHeightRange.last
 
 /** The top handle is pinned: the key height can go no further either way. */
-internal fun resizeHeightAtLimit(values: ResizeValues): Boolean =
-    values.keyHeightDp <= SettingsRepository.KEY_HEIGHT_MIN_DP ||
-        values.keyHeightDp >= SettingsRepository.KEY_HEIGHT_MAX_DP
+internal fun resizeHeightAtLimit(
+    values: ResizeValues, range: IntRange = SettingsRepository.KEY_HEIGHT_MIN_DP..SettingsRepository.KEY_HEIGHT_MAX_DP,
+): Boolean = values.keyHeightDp <= range.first || values.keyHeightDp >= range.last
 
 /** The move button is pinned against a padding bound. */
 internal fun resizePadAtLimit(values: ResizeValues, maxPad: Int): Boolean =
@@ -232,12 +299,23 @@ internal fun resizePadAtLimit(values: ResizeValues, maxPad: Int): Boolean =
  * The bottom handle is pinned: it moves the padding and the heights together,
  * so either one at its bound stops it.
  */
-internal fun resizeBottomEdgeAtLimit(values: ResizeValues, maxPad: Int): Boolean =
-    resizeHeightAtLimit(values) || resizePadAtLimit(values, maxPad)
+internal fun resizeBottomEdgeAtLimit(
+    values: ResizeValues, maxPad: Int,
+    range: IntRange = SettingsRepository.KEY_HEIGHT_MIN_DP..SettingsRepository.KEY_HEIGHT_MAX_DP,
+): Boolean = resizeHeightAtLimit(values, range) || resizePadAtLimit(values, maxPad)
 
 /** A side pad sits at one end of its slider range. */
 internal fun resizeSidePadAtLimit(pad: Float): Boolean =
     pad <= SidePadScaleRange.start || pad >= SidePadScaleRange.endInclusive
+
+/** One-handed slack can exceed the normal board's 30% side-padding range. */
+internal fun resizeOneHandedSideAtLimit(values: ResizeValues, left: Boolean): Boolean {
+    val pad = if (left) values.sidePadLeft else values.sidePadRight
+    val other = if (left) values.sidePadRight else values.sidePadLeft
+    val low = (0.05f - other).coerceAtLeast(0f)
+    val high = (0.70f - other).coerceAtLeast(low)
+    return pad <= low + 0.0001f || pad >= high - 0.0001f
+}
 
 /**
  * What Done sends the service. Fields that match [entry] go as null — "was
@@ -458,7 +536,11 @@ internal fun BoxScope.ResizeOverlay(
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
     val current = session.preview.value ?: session.entry
-    val arrangement = dockedWidthArrangement(
+    val landscape = LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    val arrangement = if (session.oneHanded) {
+        val bounds = state.settings.oneHanded.forLandscape(landscape).bounds(state.settings.oneHandedModeFor(landscape))
+        DockedWidthArrangement(bounds.width, bounds.left, bounds.right)
+    } else dockedWidthArrangement(
         state.settings,
         state.fieldAlignment ?: state.settings.keyboardAlignment,
     )
@@ -489,11 +571,11 @@ internal fun BoxScope.ResizeOverlay(
     }
 
     val maxPad = session.maxBottomPaddingDp
-    val heightAtLimit = resizeHeightAtLimit(current)
+    val heightAtLimit = resizeHeightAtLimit(current, session.keyHeightRange)
     val padAtLimit = resizePadAtLimit(current, maxPad)
-    val bottomAtLimit = resizeBottomEdgeAtLimit(current, maxPad)
-    val leftAtLimit = resizeSidePadAtLimit(current.sidePadLeft)
-    val rightAtLimit = resizeSidePadAtLimit(current.sidePadRight)
+    val bottomAtLimit = resizeBottomEdgeAtLimit(current, maxPad, session.keyHeightRange)
+    val leftAtLimit = if (session.oneHanded) resizeOneHandedSideAtLimit(current, true) else resizeSidePadAtLimit(current.sidePadLeft)
+    val rightAtLimit = if (session.oneHanded) resizeOneHandedSideAtLimit(current, false) else resizeSidePadAtLimit(current.sidePadRight)
     val toolbarAtLimit = resizeToolbarAtLimit(current)
     val limitColor = errorLimitColor(kb)
     fun handleColor(atLimit: Boolean) = if (atLimit) limitColor else kb.accent
@@ -545,7 +627,8 @@ internal fun BoxScope.ResizeOverlay(
                         val base = g.baseScalablePx
                         if (base <= 0f) return@resizeDrag null
                         val frac = (base - g.acc.y) / base
-                        resizeScaledHeights(start, frac) to { v -> resizeHeightAtLimit(v) }
+                        resizeScaledHeights(start, frac, session.keyHeightRange, session.numberHeightRange) to
+                            { v -> resizeHeightAtLimit(v, session.keyHeightRange) }
                     },
             )
             // Bottom: move the bottom edge, top edge pinned.
@@ -560,8 +643,10 @@ internal fun BoxScope.ResizeOverlay(
                         onStart = { g -> g.baseGridDp = latestScalableDp.value.value },
                     ) { g, start ->
                         val dyDp = with(density) { g.acc.y.toDp() }.value
-                        val next = resizeBottomEdgeBy(start, dyDp, g.baseGridDp, maxPad, gridDpFor)
-                        next to { v -> resizeBottomEdgeAtLimit(v, maxPad) }
+                        val next = if (!session.oneHanded) resizeBottomEdgeBy(start, dyDp, g.baseGridDp, maxPad, gridDpFor)
+                        else resizeOneHandedBottomEdgeBy(start, dyDp, g.baseGridDp, maxPad,
+                            session.keyHeightRange, session.numberHeightRange, gridDpFor)
+                        next to { v -> resizeBottomEdgeAtLimit(v, maxPad, session.keyHeightRange) }
                     },
             )
             // Left / right: the edge pads, as a share of the window width.
@@ -577,8 +662,8 @@ internal fun BoxScope.ResizeOverlay(
                         onStart = { g -> g.baseWidthPx = metrics.widthPx },
                     ) { g, start ->
                         if (g.baseWidthPx <= 0) return@resizeDrag null
-                        val next = resizeLeftPaddedBy(start, g.acc.x / g.baseWidthPx)
-                        next to { v -> resizeSidePadAtLimit(v.sidePadLeft) }
+                        val next = resizeLeftPaddedBy(start, g.acc.x / g.baseWidthPx, session.oneHanded)
+                        next to { v -> if (session.oneHanded) resizeOneHandedSideAtLimit(v, true) else resizeSidePadAtLimit(v.sidePadLeft) }
                     },
             )
             ResizeHandleBar(
@@ -593,8 +678,8 @@ internal fun BoxScope.ResizeOverlay(
                         onStart = { g -> g.baseWidthPx = metrics.widthPx },
                     ) { g, start ->
                         if (g.baseWidthPx <= 0) return@resizeDrag null
-                        val next = resizeRightPaddedBy(start, g.acc.x / g.baseWidthPx)
-                        next to { v -> resizeSidePadAtLimit(v.sidePadRight) }
+                        val next = resizeRightPaddedBy(start, g.acc.x / g.baseWidthPx, session.oneHanded)
+                        next to { v -> if (session.oneHanded) resizeOneHandedSideAtLimit(v, false) else resizeSidePadAtLimit(v.sidePadRight) }
                     },
             )
             // The toolbar's own height (#1261), on the bar itself, away from
@@ -640,14 +725,19 @@ internal fun BoxScope.ResizeOverlay(
                             .clip(CircleShape)
                             .background(kb.popup)
                             .border(1.dp, handleColor(padAtLimit), CircleShape)
-                            .resizeDrag(session = session, latestValues = latestValues) { g, start ->
+                            .resizeDrag(session = session, latestValues = latestValues,
+                                onStart = { g -> g.baseWidthPx = metrics.widthPx },
+                            ) { g, start ->
                                 val dyDp = with(density) { g.acc.y.toDp() }.value.roundToInt()
-                                resizePaddedBy(start, dyDp, maxPad) to { v -> resizePadAtLimit(v, maxPad) }
+                                val moved = if (session.oneHanded && g.baseWidthPx > 0) {
+                                    resizeOneHandedMovedBy(start, g.acc.x / g.baseWidthPx)
+                                } else start
+                                resizePaddedBy(moved, dyDp, maxPad) to { v -> resizePadAtLimit(v, maxPad) }
                             },
                     ) {
                         Icon(
                             Icons.Outlined.OpenWith,
-                            contentDescription = stringResource(R.string.ime_resize_move_desc),
+                            contentDescription = stringResource(if (session.oneHanded) R.string.ime_resize_one_handed_move_desc else R.string.ime_resize_move_desc),
                             tint = if (padAtLimit) limitColor else kb.popupText,
                             modifier = Modifier.size(24.dp),
                         )
@@ -661,10 +751,17 @@ internal fun BoxScope.ResizeOverlay(
                         },
                     )
                 }
+                session.onMatchNormalHeight?.let { match ->
+                    ResizePill(
+                        icon = Icons.Outlined.RestartAlt,
+                        label = stringResource(R.string.ime_resize_match_normal_height),
+                        onClick = { haptic(); match() },
+                    )
+                }
                 // Only once the keys are narrower than the window: at full width
                 // the bars already span it and the chip would change nothing. It
                 // previews like the drags, and only Done stores it.
-                if (arrangement.widthFraction < 0.999f) {
+                if (!session.oneHanded && arrangement.widthFraction < 0.999f) {
                     ResizePill(
                         icon = if (current.fullWidthBars) Icons.Outlined.CheckBox else Icons.Outlined.CheckBoxOutlineBlank,
                         label = stringResource(R.string.ime_resize_full_width_bars),

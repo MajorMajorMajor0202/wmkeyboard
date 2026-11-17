@@ -11,6 +11,14 @@ package com.wasimaster.wmkeyboard.core.input.composer
  * kept and ranked first by the caller.
  */
 object PinyinFuzzy {
+    /** Per-syllable arcs, controlled by the same switch and enabled pairs for every Pinyin board. */
+    internal fun costed(syllable: String,valid: Set<String>): List<kotlin.Pair<String,Double>> {
+        if(!CjkConfig.fuzzyPinyin) return listOf(syllable to 0.0)
+        return expand(syllable,valid,CjkConfig.fuzzyPinyinPairs).map {
+            it to if(it==syllable) 0.0 else kotlin.math.ln(0.15)
+        }
+    }
+
 
     /**
      * One confusion group, and the id it is stored under.

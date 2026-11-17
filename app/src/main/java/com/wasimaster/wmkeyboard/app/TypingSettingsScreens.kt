@@ -3125,6 +3125,21 @@ internal fun TypingGlideSettings(
             }
         }
     }
+    SettingsGroup(stringResource(R.string.pinyin_glide_group_title)) {
+            item(level = SettingLevel.STANDARD) {
+                ChoiceSetting(R.string.pinyin_glide_mode_title,
+                    options=listOf(0 to stringResource(R.string.pinyin_glide_mode_off),1 to stringResource(R.string.pinyin_glide_mode_dwell),2 to stringResource(R.string.pinyin_glide_mode_syllable)),
+                    selected=settings.watch { it.cjk.pinyinGlideMode },default=1
+                ) { value -> scope.launch { repository.setPinyinGlideMode(value) } }
+            }
+            item(level = SettingLevel.STANDARD) {
+                ChoiceSetting(R.string.pinyin_glide_limit_title,
+                    options=listOf(4,8,12,16,24).map { it to it.toString() },
+                    selected=settings.watch { it.cjk.pinyinGlidePopupLimit },default=12
+                ) { value -> scope.launch { repository.setPinyinGlidePopupLimit(value) } }
+            }
+    }
+
 }
 
 /**

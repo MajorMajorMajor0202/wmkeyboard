@@ -46,11 +46,23 @@ object CjkConfig {
     var jianpin: Boolean = true
         set(value) { field = value; CjkDictionaries.invalidate() }
 
-    /**
-     * The Double Pinyin scheme in use, or [DoublePinyinScheme.OFF] for full
-     * Pinyin. When set, each syllable is two keys that the composer expands to
-     * full Pinyin before the normal segmentation runs.
-     */
+    /** Delete a complete two-key syllable instead of one key, only under Double Pinyin. */
+    @Volatile
+    var doublePinyinSyllableDelete: Boolean = false
+
+    @Volatile
+    var doublePinyinRawLetters: Boolean = false
+
+    /** Accept an/en literally alongside the selected scheme. */
+    @Volatile
+    var doublePinyinLiteralFinals: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            CjkDictionaries.invalidate()
+        }
+
+    /** The active two-keystroke scheme; OFF keeps ordinary full Pinyin. */
     @Volatile
     var doublePinyin: DoublePinyinScheme = DoublePinyinScheme.OFF
         set(value) { field = value; CjkDictionaries.invalidate() }

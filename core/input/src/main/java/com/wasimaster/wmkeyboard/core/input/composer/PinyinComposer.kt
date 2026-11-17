@@ -26,6 +26,12 @@ import kotlin.math.ln
  */
 object PinyinComposer : Composer {
 
+    override fun backspaceBuffer(buffer: String): String =
+        if (CjkConfig.doublePinyinSyllableDelete && DoublePinyin.tableFor(CjkConfig.doublePinyin) != null)
+            DoublePinyin.backspaceSyllable(buffer) else super.backspaceBuffer(buffer)
+
+    override val glidesPinyinReadings: Boolean get() = true
+
     override val isTransliterating: Boolean get() = true
     override val isConversion: Boolean get() = true
     override val missingPack: String? get() = CjkDictionaries.missingPinyin
@@ -131,7 +137,7 @@ object PinyinComposer : Composer {
     private const val STROKE_GLYPHS = "一丨丿丶乙"
 
     /** A phrase pieced together pick by pick is learned up to this many syllables. */
-    private const val PHRASE_SYLLABLES = 4
+    private const val PHRASE_SYLLABLES = 16
 
     /** ...or up to this many, where every pick was a single character. */
     private const val PHRASE_SINGLES = 6
@@ -163,7 +169,7 @@ object PinyinComposer : Composer {
             return composeBuffer(buffer.substring(0, cut)) + " " + strokes
         }
         val table = doublePinyinTable()
-        return if (table != null) DoublePinyin.translate(buffer.lowercase(), table, PinyinSyllables.valid)
+        return if (table != null && !CjkConfig.doublePinyinRawLetters) DoublePinyin.translate(buffer.lowercase(), table, PinyinSyllables.valid)
         else buffer.lowercase()
     }
 
@@ -172,6 +178,7 @@ object PinyinComposer : Composer {
      * takes its digits and one decimal point.
      */
     override fun buffersChar(c: Char, composing: CharSequence): Boolean = when {
+        c == '\'' -> composing.isNotEmpty()
         c == STROKE_MARK -> composing.isNotEmpty() && STROKE_MARK !in composing && !PinyinShortcuts.isNumber(composing.toString())
         CjkConfig.pinyinShortcuts && PinyinShortcuts.continuesNumber(composing, c) -> true
         else -> false
@@ -181,12 +188,11 @@ object PinyinComposer : Composer {
     private fun strokeDigits(letters: String): String =
         letters.lowercase().mapNotNull { STROKE_LETTERS[it] ?: it.takeIf { d -> d in '1'..'5' } }.joinToString("")
 
-    /**
-     * The keys as pressed. In Double Pinyin the composing region shows the
-     * pinyin they spell (`nihc` as *nihao*), but Enter is "write what I typed",
-     * so it is what goes in (#514). In full pinyin the two are the same.
-     */
-    override fun typedReading(buffer: String): String = buffer
+    /** Enter follows the selected full-Pinyin or typed-key display mode. */
+    override fun typedReading(buffer: String): String =
+        if (doublePinyinTable() != null && !CjkConfig.doublePinyinRawLetters)
+            composeBuffer(buffer.substringBefore(STROKE_MARK)).replace("'", "")
+        else buffer.substringBefore(STROKE_MARK)
 
     override fun candidates(buffer: String): List<String> = candidates(buffer, LIMIT)
 
@@ -269,18 +275,16 @@ object PinyinComposer : Composer {
         // Learned as the decoder found it, not as Traditional output drew it:
         // the decoder looks picks up by its own words.
         CjkLearning.learn(NAMESPACE, cand.reading, cand.source)
-        val current = run?.takeIf { it.rest == b }
+        val current = run?.takeIf { it.store === CjkLearning.store &&
+            (if (it.rest.isNotEmpty()) b.startsWith(it.rest) else it.context.isNotEmpty() && it.context == CjkContext.before) }
         val previous = current?.parts?.lastOrNull() ?: contextWord()
         if (previous != null) CjkLearning.learnPair(NAMESPACE, previous, cand.source)
         val rest = remainderAfterCommit(b.substring(cand.consumed.coerceIn(0, b.length)))
         val parts = current?.parts.orEmpty() + cand.source
         val reading = (current?.reading ?: "") + cand.reading
-        if (rest.isNotEmpty()) {
-            run = Run(rest, parts, reading)
-            return
-        }
-        run = null
         learnPhrase(parts, reading)
+        run = if (parts.sumOf { it.codePointCount(0,it.length) } <= PHRASE_SYLLABLES)
+            Run(rest, parts, reading, CjkContext.hanTail(CjkContext.before+cand.source), CjkLearning.store) else null
     }
 
     /**
@@ -306,11 +310,11 @@ object PinyinComposer : Composer {
     }
 
     /**
-     * One buffer committed a pick at a time: what is left of it, and what the
-     * picks so far wrote and read. Main-thread state, like the service's own
-     * composing buffer; a pick for any other buffer starts afresh.
+     * Explicit picks within a buffer or consecutive buffers at the same Han
+     * context. A remaining buffer may grow as the user types more syllables;
+     * a completed one must still be directly before the caret to continue.
      */
-    private class Run(val rest: String, val parts: List<String>, val reading: String)
+    private class Run(val rest: String, val parts: List<String>, val reading: String, val context: String, val store: CjkUserHistory?)
 
     @Volatile
     private var run: Run? = null
@@ -318,10 +322,8 @@ object PinyinComposer : Composer {
     /**
      * A buffer committed in two picks or more is a phrase the decoder did not
      * offer whole: learned as one word, so it does next time — 我的妈妈 for
-     * `wdmm` once it has been picked as 我的 + 妈妈. Kept short, the way
-     * libime keeps it (four syllables, or single characters), and skipped
-     * where the word pairs already join every pick to the next, since the
-     * decoder will find that reading on its own.
+     * `wdmm` once it has been picked as 我的 + 妈妈. Long compounds stay bounded; explicit picks still create a whole-word
+     * entry even when the ngram table already knows the adjacent word pairs.
      */
     private fun learnPhrase(parts: List<String>, reading: String) {
         if (parts.size < 2) return
@@ -329,8 +331,6 @@ object PinyinComposer : Composer {
         val syllables = text.codePointCount(0, text.length)
         val singles = parts.all { it.codePointCount(0, it.length) == 1 }
         if (syllables > (if (singles) PHRASE_SINGLES else PHRASE_SYLLABLES)) return
-        val pairs = CjkDictionaries.pinyinNgrams
-        if (!pairs.isEmpty && parts.zipWithNext().all { (a, b) -> pairs.bigram(a, b) > 0 }) return
         CjkLearning.learn(NAMESPACE, reading, text)
     }
 
@@ -446,7 +446,7 @@ object PinyinComposer : Composer {
         val costs = ArrayList<Double>(4)
         if (exact) { readings.add(typed); costs.add(0.0) }
         if (exact && fuzzy) {
-            for (v in PinyinFuzzy.expand(typed, valid, fuzzyPairs).filter { it != typed }.take(FUZZY_VARIANTS)) {
+            for (v in PinyinFuzzy.expand(typed, valid, fuzzyPairs).filter { it != typed }.take(if(doublePinyinTable()!=null) Int.MAX_VALUE else FUZZY_VARIANTS)) {
                 readings.add(v); costs.add(FUZZY_PENALTY)
             }
         }
@@ -580,7 +580,7 @@ object PinyinComposer : Composer {
                 .flatMap { word -> HanVariant.traditionalForms(word).map { Cand(it, buffer.length, buffer, word) } }
                 .distinctBy { it.text }
         }
-        val opts = Lattice.Opts(limit = LOOKUP_LIMIT, stitch = stitch, coverageOrder = true, hanLevels = true)
+        val opts = Lattice.Opts(maxWordUnits = PHRASE_SYLLABLES, limit = LOOKUP_LIMIT, stitch = stitch, coverageOrder = true, hanLevels = true, maxAmbiguousSpan=if(doublePinyinTable()!=null) Int.MAX_VALUE else 2)
         val decoded = Lattice.decode(
             graph,
             dict,

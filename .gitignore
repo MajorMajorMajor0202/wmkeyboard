@@ -79,3 +79,10 @@ vendor/bundle/
 
 # Local wiki conversion output
 wiki-dist/
+
+# Local WMKeyboard development data and JVM crash dumps
+/work/
+/outputs/
+/phone-backups/
+hs_err_pid*.log
+replay_pid*.log

@@ -50,6 +50,16 @@ class CjkUserHistory(private val storageFile: File?) {
     private val bias = HashMap<String, HashMap<String, Int>>()
     private val pairs = HashMap<String, HashMap<String, HashMap<String, Int>>>()
 
+    private var personalPinyin: Map<String,Map<String,Int>> = emptyMap()
+
+    @Synchronized
+    fun setPersonalPinyin(entries: Map<String,Map<String,Int>>) {
+        if(personalPinyin==entries) return
+        personalPinyin=entries
+        revision++
+        CjkDictionaries.invalidate()
+    }
+
     /**
      * Learning events so far. Every [AGE_EVERY] of them, whatever was not
      * used in the meantime is halved ([age]), so a word picked a hundred
@@ -134,7 +144,17 @@ class CjkUserHistory(private val storageFile: File?) {
     @Synchronized
     fun userData(namespace: String): Lattice.UserData? {
         snapshots[namespace]?.let { (made, data) -> if (made == revision) return data }
-        val data = Lattice.UserData.of(picks[namespace], adjustments[namespace], pairSnapshot[namespace])
+        val learned=picks[namespace]
+        val entries=if(namespace=="pinyin" && personalPinyin.isNotEmpty()) {
+            val merged=learned.orEmpty().mapValues { it.value.toMap() }.toMutableMap()
+            for((reading,words) in personalPinyin) {
+                val counts=merged[reading].orEmpty().toMutableMap()
+                for((word,count) in words) counts[word]=maxOf(counts[word] ?: 0,count)
+                merged[reading]=counts
+            }
+            merged
+        } else learned
+        val data = Lattice.UserData.of(entries, adjustments[namespace], pairSnapshot[namespace])
         snapshots[namespace] = revision to data
         return data
     }
@@ -184,7 +204,8 @@ class CjkUserHistory(private val storageFile: File?) {
     /** How many times [word] has been chosen for [reading]. */
     @Synchronized
     fun countFor(namespace: String, reading: String, word: String): Int =
-        picks[namespace]?.get(reading)?.get(word) ?: 0
+        maxOf(picks[namespace]?.get(reading)?.get(word) ?: 0,
+            if(namespace=="pinyin") personalPinyin[reading]?.get(word) ?: 0 else 0)
 
     /** What the candidate menu has said about words in [namespace], or null when nothing. */
     fun adjustFor(namespace: String): WordAdjust? = adjustments[namespace]
@@ -274,7 +295,7 @@ class CjkUserHistory(private val storageFile: File?) {
 
     /** True when nothing has ever been learned for [namespace]. */
     @Synchronized
-    fun isEmptyFor(namespace: String): Boolean = picks[namespace].isNullOrEmpty()
+    fun isEmptyFor(namespace: String): Boolean = picks[namespace].isNullOrEmpty() && (namespace!="pinyin" || personalPinyin.isEmpty())
 
     @Synchronized
     fun clear() {

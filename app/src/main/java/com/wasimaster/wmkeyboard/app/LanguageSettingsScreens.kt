@@ -949,6 +949,12 @@ private fun LayoutsGroup(
     var borrowing by remember { mutableStateOf(false) }
     val context = LocalContext.current
     SettingsGroup {
+        item(visible = lang.id=="zh", level = SettingLevel.STANDARD) {
+                ChoiceSetting(R.string.pinyin_compact_style_title,
+                    options=listOf(false to stringResource(R.string.pinyin_compact_style_normal),true to stringResource(R.string.pinyin_compact_style_english)),
+                    selected=settings.watch { it.cjk.pinyinCompactStyle },default=false
+                ) { value -> scope.launch { repository.setPinyinCompactStyle(value) } }
+            }
         // A converted Keyman layout can only type what its author wrote once
         // its rules are on the device, so each one on the cards gets the row
         // that fetches them, naming it.
@@ -2234,6 +2240,14 @@ private fun CjkDictPackManager(
             stringResource(R.string.languages_cjk_pinyin_group_title),
             info = stringResource(R.string.languages_cjk_double_pinyin_info),
         ) {
+            item(level = SettingLevel.STANDARD) {
+                ToggleSetting(
+                    R.string.languages_pinyin_enter_guard_title,
+                    stringResource(R.string.languages_pinyin_enter_guard_subtitle),
+                    settings.watch { it.cjk.pinyinEnterDoubleTap },
+                    default = SettingsDefaults.cjk.pinyinEnterDoubleTap,
+                ) { on -> scope.launch { repository.setPinyinEnterDoubleTap(on) } }
+            }
             // Jianpin (简拼): the first letter of each syllable is enough, so
             // `wm` finds 我们. Every shipping Chinese IME does this by default
             // (#405). Under a Double Pinyin scheme a syllable is always two
@@ -2341,6 +2355,34 @@ private fun CjkDictPackManager(
                         }
                     }
                 }
+            }
+            item(level = SettingLevel.STANDARD) {
+                ChoiceSetting(
+                    R.string.languages_double_pinyin_display_title,
+                    subtitle = stringResource(R.string.languages_double_pinyin_display_subtitle),
+                    options = listOf(
+                        false to stringResource(R.string.languages_double_pinyin_display_full),
+                        true to stringResource(R.string.languages_double_pinyin_display_raw),
+                    ),
+                    selected = settings.watch { it.cjk.pinyinDoublePinyinRawLetters },
+                    default = SettingsDefaults.cjk.pinyinDoublePinyinRawLetters,
+                ) { raw -> scope.launch { repository.setPinyinDoublePinyinRawLetters(raw) } }
+            }
+            item(level = SettingLevel.STANDARD) {
+                ToggleSetting(
+                    R.string.languages_double_pinyin_literal_finals_title,
+                    stringResource(R.string.languages_double_pinyin_literal_finals_subtitle),
+                    settings.watch { it.cjk.pinyinDoublePinyinLiteralFinals },
+                    default = SettingsDefaults.cjk.pinyinDoublePinyinLiteralFinals,
+                ) { on -> scope.launch { repository.setPinyinDoublePinyinLiteralFinals(on) } }
+            }
+            item(level = SettingLevel.STANDARD) {
+                ToggleSetting(
+                    R.string.languages_cjk_double_pinyin_delete_title,
+                    stringResource(R.string.languages_cjk_double_pinyin_delete_subtitle),
+                    settings.watch { it.cjk.pinyinDoublePinyinSyllableDelete },
+                    default = SettingsDefaults.cjk.pinyinDoublePinyinSyllableDelete,
+                ) { on -> scope.launch { repository.setPinyinDoublePinyinSyllableDelete(on) } }
             }
             // Always offered, not only once Custom is picked: importing a scheme
             // file is as likely a first step as choosing the entry above, and

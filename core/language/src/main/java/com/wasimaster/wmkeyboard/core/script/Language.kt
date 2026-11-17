@@ -1325,6 +1325,8 @@ object LanguageRegistry {
                 AssetLayouts.ZH_PINYIN_ID,
                 AssetLayouts.ZH_PINYIN_CLEARFLOW_ID,
                 AssetLayouts.ZH_PINYIN_T9_ID,
+                BuiltInLayouts.COMPACT_PINYIN_ID,
+                BuiltInLayouts.PINYIN_13_ID,
                 AssetLayouts.ZH_ZHUYIN_ID,
                 AssetLayouts.ZH_ZHUYIN_T9_ID,
                 AssetLayouts.ZH_CANGJIE_ID,

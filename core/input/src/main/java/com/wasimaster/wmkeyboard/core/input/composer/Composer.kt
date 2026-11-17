@@ -2,6 +2,7 @@ package com.wasimaster.wmkeyboard.core.input.composer
 
 import com.wasimaster.wmkeyboard.core.input.imported.ImportedInputMethods
 import com.wasimaster.wmkeyboard.core.layout.LayoutSpec
+import com.wasimaster.wmkeyboard.core.layout.LayoutLayer
 import com.wasimaster.wmkeyboard.core.layout.composerType
 import com.wasimaster.wmkeyboard.core.layout.script
 import com.wasimaster.wmkeyboard.core.script.ComposerType
@@ -17,6 +18,12 @@ import com.wasimaster.wmkeyboard.core.text.Graphemes
  * script is a registry entry, not another branch in the service.
  */
 interface Composer {
+
+    /** One physical key's buffer representation; popup letters have no [letters] set. */
+    fun bufferKey(text: String, letters: String?): String = text
+
+    /** Restore ambiguous physical keys when a glide hands its decoded spelling back. */
+    fun glideBuffer(reading: String): String = reading
 
     /**
      * How many chars to remove from the end of [before] to delete one visual
@@ -114,6 +121,9 @@ interface Composer {
      * composer.
      */
     val glidesKanaReadings: Boolean get() = false
+
+    /** Glides spell scheme-specific Pinyin keys and continue the conversion buffer. */
+    val glidesPinyinReadings: Boolean get() = false
 
     /**
      * Whether this composer spells its buffer in roman letters: Avro's, Hindi
@@ -390,6 +400,9 @@ interface Composer {
      */
     fun readings(buffer: String): List<String> = emptyList()
 
+    /** A ranked candidate's reading for a synchronized preedit; null keeps the usual preview. */
+    fun candidatePreview(buffer: String, index: Int): String? = null
+
     /**
      * [buffer] with its next undecided part settled as [reading], one of
      * [readings] — still a buffer, so the candidates re-convert from it and the
@@ -598,5 +611,12 @@ fun composerFor(script: ScriptDef, type: ComposerType, langId: String? = null): 
 fun LayoutSpec.resolvedComposer(): Composer {
     inputMethod?.let(ImportedInputMethods::composer)?.let { return it }
     val type = composerType()
+    // Ambiguous Pinyin needs the sets of letters, which native full-Pinyin
+    // engines do not accept. Keep their ordinary layouts on the existing path.
+    val ambiguous = layers[LayoutLayer.LETTERS.key]?.rows?.flatten()
+        ?.mapNotNull { it.letters?.lowercase()?.takeIf { letters -> letters.length > 1 } }.orEmpty()
+    if (type == ComposerType.PINYIN && ambiguous.isNotEmpty() && ambiguous.all { it in CompactPinyin.supportedGroups }) {
+        return CompactPinyinComposer
+    }
     return ConversionEngines.resolve(composerFor(script(), type, langId), type, langId)
 }

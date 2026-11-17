@@ -1,0 +1,4 @@
+<resources>
+    <string name="ime_glide_undo_syllable">撤销上个音节选择</string>
+    <string name="ime_glide_retry_syllable">重畫目前音節</string>
+</resources>

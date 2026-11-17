@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="languages_double_pinyin_literal_finals_title">Literal zero-initial syllables</string>
+    <string name="languages_double_pinyin_literal_finals_subtitle">Type an and en directly alongside the original scheme codes. These two pairs prefer the literal spelling.</string>
+</resources>

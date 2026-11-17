@@ -686,6 +686,8 @@ data class KeyAlternate(
     val action: KeyAction,
     val label: String = "",
     val icon: String? = null,
+    /** The letter whose hold shortcut this entry came from, for paired-key grouping. */
+    val sourceLetter: String? = null,
 )
 
 /** What a popup draws for this alternate when it has no icon; see [KeyAlternate]. */

@@ -1,0 +1,8 @@
+<resources>
+    <string name="languages_pinyin_enter_guard_title">Double-tap Enter to commit letters</string>
+    <string name="languages_pinyin_enter_guard_subtitle">While choosing Pinyin candidates, press Enter twice within 0.5 seconds to commit letters. A single press keeps the reading.</string>
+    <string name="languages_double_pinyin_display_title">Double Pinyin reading display</string>
+    <string name="languages_double_pinyin_display_subtitle">Enter commits the letters shown here. Applies when a Double Pinyin scheme is enabled.</string>
+    <string name="languages_double_pinyin_display_full">Full Pinyin</string>
+    <string name="languages_double_pinyin_display_raw">Typed Double Pinyin letters</string>
+</resources>

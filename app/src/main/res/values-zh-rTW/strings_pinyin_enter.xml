@@ -1,0 +1,8 @@
+<resources>
+    <string name="languages_pinyin_enter_guard_title">Enter 防誤觸</string>
+    <string name="languages_pinyin_enter_guard_subtitle">拼音選詞時，0.5 秒內雙擊 Enter 才輸出字母；單擊保留拼音。</string>
+    <string name="languages_double_pinyin_display_title">雙拼輸入字母顯示</string>
+    <string name="languages_double_pinyin_display_subtitle">選擇輸入框顯示全拼或實際雙拼字母，Enter 按顯示方式輸出字母。啟用雙拼方案時生效。</string>
+    <string name="languages_double_pinyin_display_full">全拼字母</string>
+    <string name="languages_double_pinyin_display_raw">實際輸入的雙拼字母</string>
+</resources>

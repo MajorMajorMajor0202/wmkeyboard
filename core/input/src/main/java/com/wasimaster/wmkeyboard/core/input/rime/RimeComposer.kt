@@ -82,6 +82,8 @@ class RimeComposer internal constructor(
     override fun buffersChar(c: Char): Boolean = base.buffersChar(c)
     override fun buffersChar(c: Char, composing: CharSequence): Boolean = base.buffersChar(c, composing)
     override val glideKeys: Set<Int> get() = base.glideKeys
+    override val glidesPinyinReadings: Boolean get() = base.glidesPinyinReadings
+    override fun glideBuffer(reading: String): String = base.glideBuffer(reading)
     override val isConversion: Boolean get() = true
     override val keepsUnconvertedReading: Boolean get() = base.keepsUnconvertedReading
 
@@ -159,6 +161,14 @@ class RimeComposer internal constructor(
     }
 
     private fun ranked(buffer: String): Ranked {
+        // RIME schemas do not share the app's selected fuzzy groups or literal-final aliases.
+        if(method==RimeMethod.PINYIN &&
+            (com.wasimaster.wmkeyboard.core.input.composer.CjkConfig.fuzzyPinyin ||
+                com.wasimaster.wmkeyboard.core.input.composer.CjkConfig.doublePinyinLiteralFinals) &&
+            com.wasimaster.wmkeyboard.core.input.composer.DoublePinyin.tableFor(
+                com.wasimaster.wmkeyboard.core.input.composer.CjkConfig.doublePinyin)!=null) {
+            return Ranked("",-1,base.candidates(buffer,DEPTH),null,null)
+        }
         val opts = options()
         // The region and whether its tables have landed change the text too.
         val key = "$schema|$opts|${HanVariant.region}|${HanVariant.s2t.isEmpty()}|$buffer"

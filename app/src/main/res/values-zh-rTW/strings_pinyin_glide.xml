@@ -1,0 +1,11 @@
+<resources>
+    <string name="pinyin_compact_style_title">十四键键盘样式</string>
+    <string name="pinyin_compact_style_normal">全拼比例（窄 L/M）</string>
+    <string name="pinyin_compact_style_english">Compact 比例（等宽 L/M）</string>
+    <string name="pinyin_glide_mode_title">双拼滑行拼音选择</string>
+    <string name="pinyin_glide_mode_off">仅抬手后选择</string>
+    <string name="pinyin_glide_mode_dwell">停留选择，继续滑行</string>
+    <string name="pinyin_glide_mode_syllable">每两个键确认音节</string>
+    <string name="pinyin_glide_limit_title">停留弹窗上限（拼音字母数）</string>
+    <string name="pinyin_glide_group_title">中文双拼</string>
+</resources>
