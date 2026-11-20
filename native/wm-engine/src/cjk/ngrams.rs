@@ -14,8 +14,10 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 const MAGIC: [u8; 4] = *b"WMCN";
-const VERSION: u32 = 1;
+// Version 1 cached only eight followers. Rebuild it from the original TSV.
+const VERSION: u32 = 2;
 const HEADER: usize = 56;
+const INDEXED_SUCCESSORS: usize = 48;
 
 #[derive(Clone)]
 pub struct CjkNgrams {
@@ -48,7 +50,7 @@ impl Default for CjkNgrams {
     }
 }
 
-/// Successors kept per word.
+/// Default number of successors shown by the desktop predictor.
 pub const SUCCESSORS: usize = 8;
 
 fn log_backoff() -> f64 {
@@ -179,7 +181,7 @@ impl CjkNgrams {
             succ_start[w as usize] = succ_words.len() as u32;
             let mut taken = 0;
             while i < ranked.len() && ranked[i].0 == w {
-                if taken < SUCCESSORS {
+                if taken < INDEXED_SUCCESSORS {
                     succ_words.push(ranked[i].2);
                     succ_counts.push(ranked[i].1);
                     taken += 1;
@@ -364,13 +366,17 @@ impl CjkNgrams {
 
     /// The words seen most often after `word`, commonest first.
     pub fn successors(&self, word: &str) -> Vec<(String, i32)> {
+        self.successors_limited(word, SUCCESSORS)
+    }
+
+    pub fn successors_limited(&self, word: &str, limit: usize) -> Vec<(String, i32)> {
         let Ok(i) = self.word_index(word) else {
             return Vec::new();
         };
         let b = self.raw();
         let start = read_u32(b, self.succ_start + i * 4) as usize;
         let end = read_u32(b, self.succ_start + (i + 1) * 4) as usize;
-        (start..end.min(self.succs))
+        (start..end.min(self.succs).min(start.saturating_add(limit)))
             .map(|k| {
                 let next = read_u32(b, self.succ_words + k * 4) as usize;
                 (self.word(next).to_string(), read_u32(b, self.succ_counts + k * 4) as i32)

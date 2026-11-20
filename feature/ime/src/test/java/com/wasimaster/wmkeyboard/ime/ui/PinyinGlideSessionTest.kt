@@ -17,12 +17,17 @@ class PinyinGlideSessionTest {
         assertEquals(listOf("you"),session.choices.map { it.reading })
         assertEquals(a,session.undo());assertFalse(session.canUndo);assertNull(session.undo())
     }
-    @Test fun `jitter is not a repeat but departure and return are`() {
+    @Test fun `a local circle repeats where jitter and backtracking do not`() {
         val keys=listOf(DoublePinyinGlide.Key("lm",0.0,0.0),DoublePinyinGlide.Key("jk",3.0,0.0))
         val jitter=listOf(DoublePinyinGlide.Point(0.0,0.0,0),DoublePinyinGlide.Point(0.1,0.1,120),DoublePinyinGlide.Point(0.0,0.0,400))
         assertEquals(listOf(0),PinyinGlideSession.visits(jitter,keys))
-        val loop=listOf(DoublePinyinGlide.Point(0.0,0.0,0),DoublePinyinGlide.Point(0.0,1.0,100),DoublePinyinGlide.Point(0.0,0.0,200))
-        assertEquals(listOf(0,0),PinyinGlideSession.visits(loop,keys))
+        val backtrack = listOf(0.0, 1.0, 0.0).map { DoublePinyinGlide.Point(it, 0.0) }
+        assertEquals(listOf(0), PinyinGlideSession.visits(backtrack, keys))
+        val circle = List(25) { i ->
+            val angle = i * 2 * Math.PI / 24
+            DoublePinyinGlide.Point(0.3 * kotlin.math.cos(angle), 0.3 * kotlin.math.sin(angle))
+        }
+        assertEquals(listOf(0, 0), PinyinGlideSession.visits(circle, keys))
     }
 
     @Test fun `a full combination still undoes one syllable and only that syllables stroke`() {

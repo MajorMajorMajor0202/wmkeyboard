@@ -49,7 +49,8 @@ class CjkNgrams private constructor(internal val handle: Long) {
     /**
      * The words seen most often straight after [word], commonest first, each
      * with the pair's count: what the strip offers once [word] is written
-     * (#580 follow-up). Only the [SUCCESSORS] commonest per word are kept.
+     * (#580 follow-up). The native index stores a bounded pool per word so
+     * ranking can consider more followers than it displays.
      */
     fun successors(word: String, limit: Int = SUCCESSORS): List<Pair<String, Int>> {
         if (handle == 0L || limit <= 0) return emptyList()
@@ -99,7 +100,7 @@ class CjkNgrams private constructor(internal val handle: Long) {
         @Volatile
         var bigramWeight: Double = 0.0
 
-        /** Successors kept per word for [successors]. */
+        /** Default number of successors returned by [successors]. */
         const val SUCCESSORS = 8
 
         private const val SEP = '\u0001'

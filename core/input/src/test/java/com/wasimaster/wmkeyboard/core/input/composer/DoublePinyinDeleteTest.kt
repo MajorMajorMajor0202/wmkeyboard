@@ -24,10 +24,33 @@ class DoublePinyinDeleteTest {
     @Test fun `option off and full pinyin retain character deletion`() {
         CjkConfig.doublePinyin = DoublePinyinScheme.XIAOHE
         assertEquals("nih", PinyinComposer.backspaceBuffer("nihc"))
+        assertEquals("nicni" to 2, PinyinComposer.backspaceReading("nihcni", 3))
         CjkConfig.doublePinyinSyllableDelete = true
         CjkConfig.doublePinyin = DoublePinyinScheme.OFF
         assertEquals("niha", PinyinComposer.backspaceBuffer("nihao"))
         assertEquals(CompactPinyin.encode("niha"), CompactPinyinComposer.backspaceBuffer(CompactPinyin.encode("nihao")))
+    }
+    @Test fun `backspace inside a pair deletes both keys and preserves the suffix`() {
+        CjkConfig.doublePinyin = DoublePinyinScheme.XIAOHE
+        CjkConfig.doublePinyinSyllableDelete = true
+        assertEquals("nini" to 2, PinyinComposer.backspaceReading("nihcni", 3))
+        assertEquals("hcni" to 0, PinyinComposer.backspaceReading("nihcni", 2))
+        assertEquals("ni'ni" to 3, PinyinComposer.backspaceReading("ni'hc'ni", 4))
+        assertEquals("hc" to 0, PinyinComposer.backspaceReading("ni'hc", 1))
+        assertEquals("ni'ni" to 3, PinyinComposer.backspaceReading("ni'h'ni", 4))
+    }
+    @Test fun `compact backspace works inside raw and locked syllables`() {
+        CjkConfig.doublePinyin = DoublePinyinScheme.XIAOHE
+        CjkConfig.doublePinyinSyllableDelete = true
+        val ni = CompactReadingBuffer.selected(CompactPinyin.encode("ni"), "ni")
+        val hc = CompactPinyin.encode("hc")
+        val hao = CompactReadingBuffer.selected(hc, "hao")
+        assertEquals(ni + ni to ni.length, CompactPinyinComposer.backspaceReading(ni + hc + ni, ni.length + 1))
+        val reading = ni + hao + ni
+        val insideHao = CompactPinyinComposer.bufferIndex(reading, 3)
+        assertEquals(ni + ni to ni.length, CompactPinyinComposer.backspaceReading(reading, insideHao))
+        val beforeHao = CompactPinyinComposer.bufferIndex(reading, 2)
+        assertEquals(hao + ni to 0, CompactPinyinComposer.backspaceReading(reading, beforeHao))
     }
     @Test fun `compact raw and picked readings delete one complete syllable`() {
         CjkConfig.doublePinyin = DoublePinyinScheme.XIAOHE

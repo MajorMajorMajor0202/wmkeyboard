@@ -39,7 +39,15 @@ internal object CompactReadingBuffer {
         val out = Array(buffer.length + 1) { emptyList<CompactPinyin.Edge>() }
         for (part in parts(buffer)) {
             if (part.reading != null) {
-                out[part.start] = listOf(CompactPinyin.Edge(part.end, part.reading, false))
+                // The plain graph skips separators before a syllable and consumes trailing ones.
+                // A separator next to an inline selection must behave the same way.
+                var after = part.end
+                while (after < buffer.length && buffer[after] == '\'') after++
+                val end = if (after == buffer.length) after else part.end
+                val edges = listOf(CompactPinyin.Edge(end, part.reading, false))
+                var start = part.start
+                out[start] = edges
+                while (start > 0 && buffer[start - 1] == '\'') out[--start] = edges
             } else {
                 val graph = plain(part.raw)
                 for (node in part.raw.indices) out[part.start + node] = graph[node].map { it.copy(to = it.to + part.start) }

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="languages_double_pinyin_literal_finals_title">兼容零声母原拼</string>
-    <string name="languages_double_pinyin_literal_finals_subtitle">直接输入 an、en，同时保留方案原编码。这两组按键优先按原拼解释。</string>
+    <string name="languages_double_pinyin_literal_finals_subtitle">可直接输入 an、en、ao、ai、ei。按键组合与双拼方案冲突时，优先按原拼解释。</string>
 </resources>

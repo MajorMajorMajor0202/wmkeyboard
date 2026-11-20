@@ -84,7 +84,7 @@ internal val DoublePinyinStartSchemes: List<DoublePinyinScheme> = listOf(
 
 /** [scheme]'s key table as editable text, or null for one with no table of its own. */
 internal fun doublePinyinStartText(scheme: DoublePinyinScheme, name: String): String? =
-    DoublePinyin.tableFor(scheme)?.let { DoublePinyinProfile.write(it, name) }
+    DoublePinyin.tableFor(scheme, literalFinals = false)?.let { DoublePinyinProfile.write(it, name) }
 
 /**
  * The user's own Double Pinyin scheme as text (#502), in the editor the layout

@@ -53,7 +53,7 @@ object CjkConfig {
     @Volatile
     var doublePinyinRawLetters: Boolean = false
 
-    /** Accept an/en literally alongside the selected scheme. */
+    /** Accept an, en, ao, ai, and ei as literal zero-initial syllables in Double Pinyin. */
     @Volatile
     var doublePinyinLiteralFinals: Boolean = false
         set(value) {

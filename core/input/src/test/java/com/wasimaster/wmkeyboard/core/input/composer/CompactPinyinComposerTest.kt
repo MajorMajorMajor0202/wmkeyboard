@@ -26,6 +26,7 @@ class CompactPinyinComposerTest {
         CjkConfig.jianpin = true
         CjkConfig.fuzzyPinyin = false
         CjkConfig.doublePinyin = DoublePinyinScheme.OFF
+        CjkConfig.doublePinyinRawLetters = false
         CjkConfig.traditionalOutput = false
         CjkDictionaries.pinyinNgrams = CjkNgrams.EMPTY
         PinyinSyllables.valid = setOf("ni", "hao", "zhong", "guo", "xi", "an", "xian", "nin", "ne", "e", "shi", "jie")
@@ -50,9 +51,38 @@ class CompactPinyinComposerTest {
         Jianpin.index = Jianpin.EMPTY
         CjkConfig.jianpin = true
         CjkConfig.doublePinyin = DoublePinyinScheme.OFF
+        CjkConfig.doublePinyinRawLetters = false
     }
 
     private fun taps(reading: String): String = CompactPinyin.encode(reading)
+
+    @Test fun `an opening word can survive ambiguous taps until its common continuation`() {
+        CjkConfig.doublePinyin = DoublePinyinScheme.XIAOHE
+        PinyinSyllables.valid = setOf("wu", "qi", "yi")
+        val competitors = "其期起气器七齐奇妻欺".toList()
+        CjkDictionaries.pinyin = ConversionDictionary.parse((
+            listOf("wu\t无\t700", "yiyi\t意义\t800") + competitors.map { "qi\t$it\t900" }
+        ).asSequence())
+        CjkDictionaries.pinyinNgrams = CjkNgrams.parse((
+            listOf("无\t1000", "意义\t900") + competitors.map { "$it\t10000" } +
+            listOf("其\t意义\t1", "无\t意义\t300")
+        ).asSequence())
+
+        val buffer = taps("wuyiyi")
+        assertEquals("无意义", composer.candidates(buffer).first())
+        assertEquals(buffer.length, composer.consumedForIndex(buffer, 0))
+    }
+
+    @Test fun `raw double pinyin displays the physical letters for the leading or selected reading`() {
+        CjkConfig.doublePinyin = DoublePinyinScheme.XIAOHE
+        CjkConfig.doublePinyinRawLetters = true
+        val buffer = taps("nihc")
+        composer.candidates(buffer)
+        assertEquals("nihc", composer.candidatePreview(buffer, 0))
+        val selected = composer.pickReading(buffer, "ni")!!
+        assertTrue(composer.composeBuffer(selected).startsWith("ni"))
+        assertEquals(0, composer.moveReadingIndex(selected, selected.length - 2, -1))
+    }
 
     @Test fun `reading picks constrain successive syllables and backspace undoes one pick`() {
         val original = taps("nihao")
@@ -94,12 +124,13 @@ class CompactPinyinComposerTest {
         CjkDictionaries.pinyin = ConversionDictionary.parse(sequenceOf(
             "mian\t面\t1000", "mama\t妈妈\t10000", "nihao\t你好\t1000",
         ))
-        assertTrue(composer.candidates(taps("m")).isEmpty())
+        assertTrue("\u9762" in composer.candidates(taps("m")))
+        assertEquals("m", composer.composeBuffer(taps("m")))
         assertEquals("面", composer.candidates(taps("mm")).first())
         assertFalse("妈妈" in composer.candidates(taps("mm")))
         assertEquals("你好", composer.candidates(taps("nihc")).first())
         assertEquals(2, composer.consumedFor(taps("mm"), "面"))
-        assertTrue(composer.candidates(composer.backspaceBuffer(taps("mm"))).isEmpty())
+        assertTrue("\u9762" in composer.candidates(composer.backspaceBuffer(taps("mm"))))
         assertEquals("面", composer.candidates(taps("mm'")).first())
         CjkConfig.doublePinyin = DoublePinyinScheme.OFF
         assertTrue("妈妈" in composer.candidates(taps("mm")))

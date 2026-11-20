@@ -222,6 +222,37 @@ class PinyinExtrasTest {
         assertTrue(ngrams.logProbability("a", "c", 0, 0) > ngrams.logProbability("b", "a", 0, 0))
     }
 
+    @Test
+    fun `word context can promote a follower outside the old index and ignore the bare character completion`() {
+        val common = (0 until 35).map { "常${('一'.code + it).toChar()}" }
+        val ngrams = CjkNgrams.parse((
+            listOf("觉得\t1000", "得\t500", "得到\t400", "可以\t30") +
+                common.map { "$it\t1000000" } + common.map { "觉得\t$it\t32" } + "觉得\t可以\t30"
+            ).asSequence())
+        CjkDictionaries.pinyinNgrams = ngrams
+        assertEquals(8, ngrams.successors("觉得").size)
+        assertEquals("可以" to 30, ngrams.successors("觉得", 48).last())
+        assertEquals("可以", PinyinComposer.predictions("我觉得", 3).first())
+        assertFalse("到" in PinyinComposer.predictions("我觉得", 12))
+        assertEquals(listOf("到"), PinyinComposer.predictions("得", 3))
+    }
+
+    @Test
+    fun `strong pairs compose a short continuation while weak or blocked links do not`() {
+        CjkDictionaries.pinyinNgrams = CjkNgrams.parse(sequenceOf(
+            "采取\t1000", "措施\t500", "有效\t300", "行动\t100", "办法\t100",
+            "采取\t措施\t120", "采取\t有效\t70", "有效\t措施\t60", "有效\t办法\t2",
+        ))
+        assertEquals(listOf("措施", "有效", "有效措施"), PinyinComposer.predictions("采取", 3))
+        assertFalse("有效办法" in PinyinComposer.predictions("采取", 12))
+        CjkLearning.store = CjkUserHistory(null)
+        PinyinComposer.learnPrediction("采取", "行动")
+        assertEquals("行动", PinyinComposer.predictions("采取", 3).first())
+        CjkLearning.store?.block("pinyin", "有效措施")
+        assertFalse("有效措施" in PinyinComposer.predictions("采取", 12))
+        assertTrue(PinyinComposer.predictions("采取。", 3).isEmpty())
+    }
+
     // --- shortcuts ------------------------------------------------------------
 
     @Test

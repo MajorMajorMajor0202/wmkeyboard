@@ -11,23 +11,97 @@ package com.wasimaster.wmkeyboard.core.input.composer
  * disambiguates and makes the scheme tables forgiving of small mistakes.
  */
 object DoublePinyin {
-    internal fun fuzzyGraph(buffer: String,table: Table,inventory: Set<String>): Lattice.Graph {
-        val units=segments(buffer,table,inventory)
-        val boundaries=IntArray(units.size+1)
-        for(i in units.indices) boundaries[i+1]=boundaries[i]+units[i].inputLen
-        val options=units.map { PinyinFuzzy.costed(it.syllable,inventory) }
-        return Lattice.graph(Lattice.Input(boundaries,
+    internal fun fuzzyGraph(
+        buffer: String, table: Table, inventory: Set<String>, completeTail: Boolean = false,
+    ): Lattice.Graph {
+        val units = segments(if (completeTail) buffer.trimEnd('\'') else buffer, table, inventory)
+        val ends = mutableListOf(0)
+        val options = units.mapTo(mutableListOf()) {
+            ends.add(ends.last() + it.inputLen)
+            PinyinFuzzy.costed(it.syllable, inventory)
+        }
+        if (completeTail) {
+            val completions = pendingFirstKey(buffer, ends.last())
+                ?.let { firstKeyReadings(it, table, inventory) }.orEmpty()
+            if (completions.isNotEmpty()) {
+                ends.add(buffer.length)
+                options.add(completions.map { (reading, cost) -> reading to (cost + kotlin.math.ln(0.15)) })
+            }
+        }
+        return Lattice.graph(Lattice.Input(
+            ends.toIntArray(),
             Array(options.size) { i -> options[i].map { it.first }.toTypedArray() },
-            Array(options.size) { i -> options[i].map { it.second }.toDoubleArray() }))
+            Array(options.size) { i -> options[i].map { it.second }.toDoubleArray() },
+            IntArray(options.size) { i -> if (i >= units.size) 0 else options[i].size },
+        ))
+    }
+
+    /** The lone key left after the completed pairs at [offset], allowing separators. */
+    internal fun pendingFirstKey(buffer: String, offset: Int): Char? {
+        val start = skipSeparators(buffer, offset)
+        return buffer.getOrNull(start)?.lowercaseChar()?.takeIf {
+            skipSeparators(buffer, start + 1) == buffer.length
+        }
+    }
+
+    @Volatile private var firstKeyCache: Triple<Table, Set<String>, Map<Char, Map<String, String>>>? = null
+
+    /** Zero-initial lead keys may spell other vowels too; prefer their own vowel. */
+    internal fun firstKeyReadings(key: Char, table: Table, valid: Set<String>): List<Pair<String, Double>> =
+        firstKeyCodes(key, table, valid).values.distinct().map { reading ->
+            reading to if (key in table.zeroLeads && !reading.startsWith(key)) kotlin.math.ln(0.15) else 0.0
+        }
+
+    /** Every valid code beginning with [key], including aliases and non-letter final keys. */
+    internal fun firstKeyCodes(key: Char, table: Table, valid: Set<String>): Map<String, String> {
+        val cached = firstKeyCache
+        if (cached != null && cached.first === table && cached.second === valid) return cached.third[key].orEmpty()
+        val firstKeys = table.initials.keys + table.zeroLeads + table.codes.keys.map { it.first() }
+        val finalKeys = ('a'..'z').toSet() + table.finals.keys + table.codes.keys.map { it.last() }
+        val byFirst = firstKeys.associateWith { first ->
+            buildMap {
+                for (final in finalKeys) {
+                    val syllable = syllableFor(first, final, table, valid)
+                    if (syllable in valid) put("$first$final", syllable)
+                }
+            }
+        }
+        firstKeyCache = Triple(table, valid, byFirst)
+        return byFirst[key].orEmpty()
     }
 
     /** Delete the last complete pair, or a dangling first key, including its separator. */
     fun backspaceSyllable(buffer: String): String {
-        val text = buffer.trimEnd('\'')
-        if (text.isEmpty()) return ""
-        val start = text.lastIndexOf('\'') + 1
-        val remove = if ((text.length - start) % 2 == 0) 2 else 1
-        return text.dropLast(remove).trimEnd('\'')
+        val key = lastKeyBeforeCaret(buffer, buffer.length)
+        return if (key < 0) "" else removeSyllable(buffer, syllableAt(buffer, key)).first
+    }
+
+    internal fun lastKeyBeforeCaret(buffer: String, caret: Int): Int {
+        var key = caret - 1
+        while (key >= 0 && buffer[key] == '\'') key--
+        return key
+    }
+
+    /** The syllable containing the key just before the caret, within one raw run. */
+    internal fun syllableAt(buffer: String, key: Int): IntRange {
+        val runStart = buffer.lastIndexOf('\'', key) + 1
+        val start = key - (key - runStart) % 2
+        val second = start + 1
+        val end = if (second < buffer.length && buffer[second] != '\'') second + 1 else second
+        return start until end
+    }
+
+    /** Keep at most one separator at the join, and only between surviving readings. */
+    internal fun removeSyllable(buffer: String, syllable: IntRange): Pair<String, Int> {
+        val start = syllable.first
+        val end = syllable.last + 1
+        var left = start
+        var right = end
+        while (left > 0 && buffer[left - 1] == '\'') left--
+        while (right < buffer.length && buffer[right] == '\'') right++
+        val separator = if (left > 0 && right < buffer.length && (left < start || right > end)) "'" else ""
+        val caret = left + if (left < start) separator.length else 0
+        return (buffer.substring(0, left) + separator + buffer.substring(right)) to caret
     }
 
 
@@ -51,6 +125,8 @@ object DoublePinyin {
     /** The zero-initial lead keys of every shipped scheme. */
     val DEFAULT_ZERO_LEADS: Set<Char> = setOf('a', 'e', 'o')
 
+    private val LITERAL_ZERO_INITIAL_CODES = listOf("an", "en", "ao", "ai", "ei").associateWith { it }
+
     private val TABLES: Map<DoublePinyinScheme, Table> = mapOf(
         DoublePinyinScheme.MICROSOFT to MICROSOFT,
         DoublePinyinScheme.SOGOU to SOGOU,
@@ -63,13 +139,13 @@ object DoublePinyin {
      * The key maps for [scheme]. [DoublePinyinScheme.CUSTOM] is the user's own
      * scheme from [CjkConfig.customDoublePinyin], null while that is empty, so
      * typing falls back to full Pinyin rather than to some other scheme.
+     * Scheme editors can request the original table by passing [literalFinals] as false.
      */
-    fun tableFor(scheme: DoublePinyinScheme): Table? {
+    fun tableFor(scheme: DoublePinyinScheme, literalFinals: Boolean = CjkConfig.doublePinyinLiteralFinals): Table? {
         val table = if (scheme == DoublePinyinScheme.CUSTOM) CjkConfig.customDoublePinyinTable else TABLES[scheme]
-        if (table == null || !CjkConfig.doublePinyinLiteralFinals) return table
+        if (table == null || !literalFinals) return table
         literalCache?.let { if (it.first === table) return it.second }
-        // Explicit aliases win over the scheme, while its original codes still work.
-        return table.copy(codes = table.codes + mapOf("an" to "an", "en" to "en")).also {
+        return table.copy(codes = table.codes + LITERAL_ZERO_INITIAL_CODES).also {
             literalCache = table to it
         }
     }

@@ -81,11 +81,13 @@ object PinyinSpellings {
 
         val completions = HashMap<String, MutableList<String>>()
         for (s in valid.sorted()) {
-            for (len in 2..minOf(MAX_PARTIAL, s.length - 1)) {
+            val syllableInitial = initialOf(s)
+            for (len in 1..minOf(MAX_PARTIAL, s.length - 1)) {
                 val prefix = s.substring(0, len)
-                if (prefix in valid || prefix in aliases || prefix.none { it in VOWELS }) continue
+                val bareStart = prefix == syllableInitial || (len == 1 && syllableInitial.isEmpty())
+                if (!bareStart && (len == 1 || prefix in valid || prefix in aliases || prefix.none { it in VOWELS })) continue
                 val list = completions.getOrPut(prefix) { ArrayList() }
-                if (list.size < MAX_COMPLETIONS) list.add(s)
+                if (bareStart || list.size < MAX_COMPLETIONS) list.add(s)
             }
         }
         return Tables(aliases, completions)

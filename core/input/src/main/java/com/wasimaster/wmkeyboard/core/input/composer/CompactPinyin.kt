@@ -38,6 +38,23 @@ internal object CompactPinyin {
     /** Safe, readable fallback even before the Chinese pack has loaded. */
     fun literal(buffer: String): String = buffer.map { letters(it).first() }.joinToString("")
 
+    /** Resolve a pair without choosing a letter outside either physical key. */
+    fun doubleCode(
+        first: Char, second: Char, reading: String, table: DoublePinyin.Table,
+        inventory: Set<String>,
+    ): String? {
+        var fuzzy: String? = null
+        for (a in letters(first)) for (b in letters(second)) {
+            val code = "$a$b"
+            val exact = DoublePinyin.translate(code, table, inventory)
+            if (exact == reading) return code
+            if (fuzzy == null && exact in inventory &&
+                PinyinFuzzy.costed(exact, inventory).any { it.first == reading }
+            ) fuzzy = code
+        }
+        return fuzzy
+    }
+
     data class Edge(val to: Int, val reading: String, val abbreviated: Boolean, val cost: Double = 0.0)
 
     /** Nodes are original key positions, including apostrophes. */
@@ -93,14 +110,27 @@ internal object CompactPinyin {
     }
 
     /** Fixed two-key syllables; no whole-buffer letter combinations. */
-    fun doubleGraph(buffer: String, table: DoublePinyin.Table, inventory: Set<String>): Array<List<Edge>> {
+    fun doubleGraph(
+        buffer: String, table: DoublePinyin.Table, inventory: Set<String>, completeTail: Boolean = false,
+    ): Array<List<Edge>> {
         val out = Array(buffer.length + 1) { emptyList<Edge>() }
         val lastKey = buffer.indexOfLast { it != '\'' } + 1
         var from = 0
         while (from < buffer.length) {
             var start = from
             while (start < buffer.length && buffer[start] == '\'') start++
-            if (start + 1 >= buffer.length || buffer[start + 1] == '\'') break
+            if (start >= lastKey) break
+            if (start + 1 == lastKey) {
+                if (completeTail) {
+                    out[from] = letters(buffer[start]).flatMap { key ->
+                        DoublePinyin.firstKeyReadings(key, table, inventory)
+                    }.sortedByDescending { it.second }.distinctBy { it.first }.map { (reading, cost) ->
+                        Edge(buffer.length, reading, abbreviated = true, cost = cost)
+                    }
+                }
+                break
+            }
+            if (buffer[start + 1] == '\'') break
             val edges = mutableListOf<Edge>()
             for (a in letters(buffer[start])) for (b in letters(buffer[start + 1])) {
                 val reading = DoublePinyin.translate("$a$b", table, inventory)

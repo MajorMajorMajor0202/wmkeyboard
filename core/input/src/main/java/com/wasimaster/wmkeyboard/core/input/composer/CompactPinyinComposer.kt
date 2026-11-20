@@ -7,6 +7,7 @@ object CompactPinyinComposer : Composer {
     override val glidesPinyinReadings: Boolean get() = true
     override val isTransliterating: Boolean get() = true
     override val isConversion: Boolean get() = true
+    override val editsReadingInPlace: Boolean get() = true
     override val missingPack: String? get() = CjkDictionaries.missingPinyin
     override val improvingPack: String? get() = CjkDictionaries.missingPinyinNgrams
 
@@ -15,34 +16,81 @@ object CompactPinyinComposer : Composer {
     override fun glideBuffer(reading: String): String = CompactPinyin.encode(reading)
     fun glideBuffer(reading: String, groups: List<String>): String = CompactPinyin.encode(reading, groups)
 
+    /** Preserve the selected syllables when a full-Pinyin glide becomes composing text. */
+    fun predictedGlideBuffer(reading: String): String {
+        val syllables = PinyinSyllables.segment(reading)
+        if (syllables.sumOf { it.inputLen } != reading.length) return glideBuffer(reading)
+        return syllables.joinToString("") {
+            CompactReadingBuffer.selected(glideBuffer(it.syllable), it.syllable)
+        }
+    }
+
     override fun buffersChar(c: Char, composing: CharSequence): Boolean = c == '\'' && composing.isNotEmpty()
 
-    private fun rawLetters(buffer: String): String = CompactReadingBuffer.parts(buffer)
-        .joinToString("") { CompactPinyin.literal(it.raw) }
+    private fun rawLetters(buffer: String, candidate: Candidate?): String {
+        val table = DoublePinyin.tableFor(CjkConfig.doublePinyin) ?: return CompactReadingBuffer.literal(buffer)
+        val syllables = candidate?.let { candidateSyllables(buffer, it, completeOnly = true) }.orEmpty()
+        return buildString {
+            for (part in CompactReadingBuffer.parts(buffer)) {
+                val raw = part.raw
+                var at = 0
+                while (at < raw.length) {
+                    if (raw[at] == '\'' || at + 1 >= raw.length || raw[at + 1] == '\'') {
+                        append(CompactPinyin.literal(raw[at++].toString()))
+                        continue
+                    }
+                    val target = part.reading ?: syllables[part.start + at]
+                    val code = target?.let {
+                        CompactPinyin.doubleCode(raw[at], raw[at + 1], it, table, PinyinSyllables.valid)
+                    }
+                    append(code ?: CompactPinyin.literal(raw.substring(at, at + 2)))
+                    at += 2
+                }
+            }
+        }
+    }
 
     /** Physical key alternatives, retaining ambiguous letters for English lookup. */
     fun englishKeyGroups(buffer: String): List<String> = CompactReadingBuffer.parts(buffer)
         .flatMap { part -> part.raw.filter { it != '\'' }.map(CompactPinyin::letters) }
 
+    /** A tap in a multi-letter key can change the reading once the dictionary resolves it. */
+    fun hasAmbiguousTaps(buffer: String): Boolean = CompactReadingBuffer.parts(buffer).any { part ->
+        part.reading == null && part.raw.any { CompactPinyin.letters(it).length > 1 }
+    }
+
     private fun showsRawLetters(): Boolean = CjkConfig.doublePinyinRawLetters &&
         DoublePinyin.tableFor(CjkConfig.doublePinyin) != null
 
     override fun composeBuffer(buffer: String): String {
-        if (showsRawLetters()) return rawLetters(buffer)
+        if (showsRawLetters()) {
+            val best = cache.peek(rankKey(buffer))?.firstOrNull()
+            return rawLetters(buffer, best)
+        }
         if (buffer.isEmpty() || buffer.length > MAX_KEYS * 10 || CompactReadingBuffer.parts(buffer).sumOf { it.raw.length } > MAX_KEYS || CjkDictionaries.pinyin.isEmpty) return CompactReadingBuffer.literal(buffer)
         val best = cache.peek(rankKey(buffer))?.firstOrNull()
-        if (best != null) return best.reading + CompactReadingBuffer.literal(buffer.substring(best.consumed))
+        if (best != null) return displayCandidate(buffer, best)
         // Preview runs on the UI thread: use only the small syllable graph,
         // leaving dictionary search and learning ranking to candidate work.
+        val previous = buffer.dropLast(1)
+        val known = cache.peek(rankKey(previous))?.firstOrNull()?.let {
+            candidateSyllables(previous, it, completeOnly = true)
+        }.orEmpty()
         val edges = graph(buffer)
         val readings = arrayOfNulls<String>(buffer.length + 1)
         val costs = DoubleArray(buffer.length + 1) { Double.POSITIVE_INFINITY }
         readings[0] = ""
         costs[0] = 0.0
+        val doublePinyin = DoublePinyin.tableFor(CjkConfig.doublePinyin) != null
         for (node in buffer.indices) {
             val prefix = readings[node] ?: continue
+            var start = node
+            while (start < buffer.length && buffer[start] == '\'') start++
+            val preferred = known[start]
             for (edge in edges[node]) {
-                val cost = costs[node] + 1.0 - edge.cost + if (edge.abbreviated) 10.0 else 0.0
+                if (doublePinyin && edge.abbreviated) continue
+                val change = if (preferred == null || preferred == edge.reading) 0.0 else 1.0
+                val cost = costs[node] + 1.0 - edge.cost + change + if (edge.abbreviated) 10.0 else 0.0
                 if (cost < costs[edge.to]) {
                     costs[edge.to] = cost
                     readings[edge.to] = prefix + edge.reading
@@ -54,9 +102,87 @@ object CompactPinyinComposer : Composer {
     }
 
     override fun candidatePreview(buffer: String, index: Int): String? {
-        if (showsRawLetters()) return rawLetters(buffer)
-        val candidate = cache.peek(rankKey(buffer))?.getOrNull(index) ?: return null
+        val candidate = cache.peek(rankKey(buffer))?.getOrNull(index)
+        if (showsRawLetters()) return rawLetters(buffer, candidate)
+        candidate ?: return null
+        return displayCandidate(buffer, candidate)
+    }
+
+    private fun displayCandidate(buffer: String, candidate: Candidate): String {
+        // In double Pinyin the last unpaired key remains visible until a final
+        // key is typed, even when the strip can already suggest the whole word.
+        if (DoublePinyin.tableFor(CjkConfig.doublePinyin) != null && candidate.consumed == buffer.length) {
+            val tail = CompactReadingBuffer.parts(buffer).lastOrNull()
+            if (tail != null && tail.reading == null) {
+                val key = DoublePinyin.lastKeyBeforeCaret(tail.raw, tail.raw.length)
+                if (key >= 0 && DoublePinyin.syllableAt(tail.raw, key).first == key) {
+                    val start = tail.start + key
+                    val completed = candidateSyllables(buffer, candidate)[start]
+                    if (completed != null) {
+                        return candidate.reading.removeSuffix(completed) + CompactPinyin.literal(tail.raw.substring(key))
+                    }
+                }
+            }
+        }
         return candidate.reading + CompactReadingBuffer.literal(buffer.substring(candidate.consumed))
+    }
+
+    /** Recover the exact syllable boundaries of the displayed candidate, including ambiguous compact keys. */
+    internal fun rankedSyllables(buffer: String): Map<Int, String> {
+        val candidate = cache.peek(rankKey(buffer))?.firstOrNull() ?: return emptyMap()
+        return candidateSyllables(buffer, candidate)
+    }
+
+    private fun candidateSyllables(buffer: String, candidate: Candidate, completeOnly: Boolean = false): Map<Int, String> {
+        val edges = graph(buffer)
+        val failed = mutableSetOf<Pair<Int, Int>>()
+        val result = mutableMapOf<Int, String>()
+        fun match(node: Int, offset: Int): Boolean {
+            if (node == candidate.consumed) return offset == candidate.reading.length
+            if (node > candidate.consumed || !failed.add(node to offset)) return false
+            for (edge in edges[node]) {
+                if (candidate.reading.startsWith(edge.reading, offset) && match(edge.to, offset + edge.reading.length)) {
+                    var start = node
+                    while (start < edge.to && buffer[start] == '\'') start++
+                    if (!completeOnly || !edge.abbreviated) result[start] = edge.reading
+                    return true
+                }
+            }
+            return false
+        }
+        match(0, 0)
+        return result
+    }
+
+    private fun readingStops(buffer: String): List<Int> = buildList {
+        add(0)
+        for (part in CompactReadingBuffer.parts(buffer)) {
+            if (part.reading == null) addAll((part.start + 1)..part.end) else add(part.end)
+        }
+    }
+
+    override fun moveReadingIndex(buffer: String, index: Int, delta: Int): Int {
+        val stops = readingStops(buffer)
+        val current = stops.indexOfLast { it <= index }.coerceAtLeast(0)
+        return stops[(current + delta).coerceIn(stops.indices)]
+    }
+
+    override fun previewOffset(buffer: String, index: Int): Int {
+        val stop = readingStops(buffer).last { it <= index.coerceIn(0, buffer.length) }
+        return composeBuffer(buffer.substring(0, stop)).length
+    }
+
+    override fun bufferIndex(buffer: String, offset: Int): Int {
+        val stop = readingStops(buffer).lastOrNull { previewOffset(buffer, it) <= offset } ?: 0
+        if (deletesWholeSyllables()) {
+            // A tap inside a locked reading targets that syllable on backspace.
+            // Its opaque buffer stays editable only at its boundaries.
+            val part = CompactReadingBuffer.parts(buffer).firstOrNull { it.start == stop && it.reading != null }
+            if (part != null && offset > previewOffset(buffer, stop) && offset < previewOffset(buffer, part.end)) {
+                return part.end
+            }
+        }
+        return stop
     }
 
     fun unselectReadings(buffer: String): String = CompactReadingBuffer.parts(buffer).joinToString("") { it.raw }
@@ -66,9 +192,24 @@ object CompactPinyinComposer : Composer {
         return buffer.take(part.start)+part.raw+buffer.substring(part.end)
     }
 
+    private fun deletesWholeSyllables(): Boolean =
+        CjkConfig.doublePinyinSyllableDelete && DoublePinyin.tableFor(CjkConfig.doublePinyin) != null
+
     override fun backspaceBuffer(buffer: String): String =
-        if (CjkConfig.doublePinyinSyllableDelete && DoublePinyin.tableFor(CjkConfig.doublePinyin) != null)
-            CompactReadingBuffer.backspaceSyllable(buffer) else CompactReadingBuffer.backspace(buffer)
+        if (deletesWholeSyllables()) CompactReadingBuffer.backspaceSyllable(buffer)
+        else CompactReadingBuffer.backspace(buffer)
+
+    override fun backspaceReading(buffer: String, caret: Int): Pair<String, Int> {
+        if (!deletesWholeSyllables()) return super.backspaceReading(buffer, caret)
+        val key = DoublePinyin.lastKeyBeforeCaret(buffer, caret)
+        val part = CompactReadingBuffer.parts(buffer).firstOrNull { key in it.start until it.end }
+            ?: return super.backspaceReading(buffer, caret)
+        val syllable = if (part.reading != null) part.start until part.end else {
+            val local = DoublePinyin.syllableAt(part.raw, key - part.start)
+            (part.start + local.first)..(part.start + local.last)
+        }
+        return DoublePinyin.removeSyllable(buffer, syllable)
+    }
 
     override fun readings(buffer: String): List<String> {
         val next = CompactReadingBuffer.parts(buffer).firstOrNull { it.reading == null && it.raw.any { c -> c != '\'' } }
@@ -146,7 +287,16 @@ object CompactPinyinComposer : Composer {
                 graph,
                 CjkDictionaries.pinyin,
                 CjkDictionaries.pinyinNgrams,
-                Lattice.Opts(maxWordUnits = 16, limit = LOOKUP_LIMIT, maxAmbiguousSpan = Int.MAX_VALUE, coverageOrder = true, hanLevels = true),
+                Lattice.Opts(
+                    maxWordUnits = 16,
+                    limit = LOOKUP_LIMIT,
+                    maxAmbiguousSpan = Int.MAX_VALUE,
+                    coverageOrder = true,
+                    hanLevels = true,
+                    // Competing readings share every physical pair. Keep lower-frequency
+                    // opening words until later syllables can supply their word-pair evidence.
+                    beam = if (CjkConfig.doublePinyin != DoublePinyinScheme.OFF && hasAmbiguousTaps(buffer)) 16 else 8,
+                ),
                 CjkLearning.userData(NAMESPACE),
                 Lattice.UserScope.ALL,
                 contextWord(),
@@ -169,7 +319,7 @@ object CompactPinyinComposer : Composer {
         val table = DoublePinyin.tableFor(CjkConfig.doublePinyin)
         CompactReadingBuffer.graph(buffer) { raw ->
             if (table == null) CompactPinyin.graph(raw, PinyinSyllables.valid, CjkConfig.jianpin)
-            else CompactPinyin.doubleGraph(raw, table, PinyinSyllables.valid)
+            else CompactPinyin.doubleGraph(raw, table, PinyinSyllables.valid, completeTail = true)
         }
     }
 

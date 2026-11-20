@@ -860,6 +860,7 @@ import com.wasimaster.wmkeyboard.core.input.composer.Homophones
 import com.wasimaster.wmkeyboard.core.input.composer.CjkNgrams
 import com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinScheme
 import com.wasimaster.wmkeyboard.core.input.composer.PinyinComposer
+import com.wasimaster.wmkeyboard.core.input.composer.PinyinCorrection
 import com.wasimaster.wmkeyboard.core.input.composer.DoublePinyin
 import com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinGlide
 import com.wasimaster.wmkeyboard.core.input.composer.CompactPinyinComposer
@@ -2113,6 +2114,8 @@ open class WMKeyboardService : InputMethodService() {
             )
             revisionFragment = ""
             field = value
+            pendingPinyinTap = null
+            pinyinComposingField = null
             // A word open again, or a new one, is not the one just typed (#1188).
             if (value.isNotEmpty()) twoThumbWordBehind = false
             // A word replaced wholesale (committed, picked, re-armed) is no
@@ -2149,6 +2152,7 @@ open class WMKeyboardService : InputMethodService() {
             // A new reading is edited at its end until a tap says otherwise.
             readingCaret = -1
             readingCaretEchoes.clear()
+            _uiState.update { if (it.stripReadingCaret < 0) it else it.copy(stripReadingCaret = -1) }
             publishComposingRoman()
             publishKanaVariantReady()
         }
@@ -2409,7 +2413,9 @@ open class WMKeyboardService : InputMethodService() {
                 (state.shiftState == ShiftState.ON && state.shiftPressedByUser && !opensSentence)
         }
         val caret = readingCaret
-        if (caret in 0 until composing.length) {
+        if (caret in 0 until composing.length &&
+            (!_uiState.value.composer.glidesPinyinReadings || _uiState.value.settings.cjk.pinyinCaretInReading)
+        ) {
             // Into the middle of a reading (#960). The per-key frames are for
             // a word typed left to right, which this one no longer is.
             composing.insert(caret, text)
@@ -5745,6 +5751,7 @@ open class WMKeyboardService : InputMethodService() {
                 // running against the new grid.
                 syncKeymanSession(activeSpec)
                 val shift = shiftAcrossScriptChange(activeSpec.script(), activeSpec.language())
+                val beforeSettingsUpdate = _uiState.value
                 _uiState.update {
                     it.copy(
                         settings = modeSettings,
@@ -5868,6 +5875,7 @@ open class WMKeyboardService : InputMethodService() {
                 CjkConfig.doublePinyinSyllableDelete = settings.cjk.pinyinDoublePinyinSyllableDelete
                 CjkConfig.traditionalOutput = settings.cjk.traditionalOutput
                 if (settings.cjk.traditionalOutput) loadHanVariantTables()
+                refreshPinyinCorrectionSettings(beforeSettingsUpdate)
                 // Chinese and Japanese handwriting reads through ML Kit or
                 // zinnia, and Chinese through zinnia picks its model by the
                 // Traditional switch above, so either change can move the
@@ -9421,7 +9429,9 @@ open class WMKeyboardService : InputMethodService() {
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
+        clearPinyinGlidePreview()
         readingGlideChoices = null
+        if (!restarting) pinyinReadingSelections.clear()
         super.onStartInput(attribute, restarting)
         inputStarts++
         // Runs for every field even while the soft view stays hidden
@@ -10547,8 +10557,52 @@ open class WMKeyboardService : InputMethodService() {
             if (detour) return
         }
         if (undoCaretSnapBack(newSelStart, newSelEnd)) return
+        if (pinyinGlideFieldPreview == null) {
+            pinyinComposingField?.let { written ->
+                val length = candidatesEnd - candidatesStart
+                if (currentInputConnection === written.connection && newSelStart == newSelEnd &&
+                    candidatesStart >= 0 && newSelStart == candidatesEnd &&
+                    (written.start < 0 || written.start == candidatesStart) && written.matchesLength(length)
+                ) {
+                    if (length != written.text.length) {
+                        // An older write can report its caret after newer keys have landed.
+                        // The composing start still belongs to this reading.
+                        written.start = candidatesStart
+                        return
+                    }
+                    written.start = candidatesStart
+                } else {
+                    pinyinComposingField = null
+                }
+            }
+        }
         expectedSelStart = newSelStart
         expectedSelEnd = newSelEnd
+        pinyinGlideFieldPreview?.let { preview ->
+            if (currentInputConnection === preview.connection) {
+                if (newSelStart == newSelEnd && candidatesStart >= 0 && newSelStart == candidatesEnd &&
+                    (preview.start < 0 || preview.start == candidatesStart) &&
+                    preview.matchesLength(candidatesEnd - candidatesStart)
+                ) {
+                    if (candidatesEnd - candidatesStart == preview.text.length) {
+                        preview.start = candidatesStart
+                        readingRegionStart = candidatesStart
+                    }
+                    return
+                }
+                if (newSelStart == newSelEnd && !caretStillAt(preview.connection, newSelStart)) return
+                if (newSelStart == newSelEnd && newSelStart >= preview.text.length &&
+                    preview.connection.getTextBeforeCursor(preview.text.length, 0)?.toString() == preview.text
+                ) {
+                    readingRegionStart = newSelStart - preview.text.length
+                    if (preview.connection.setComposingRegion(readingRegionStart, newSelStart)) {
+                        preview.start = readingRegionStart
+                    }
+                    return
+                }
+            }
+            clearPinyinGlidePreview(restoreField = candidatesStart >= 0)
+        }
         // The keys of a keypad sum never reach the field, so an update while
         // one is open is the field moving on its own: a tap elsewhere, a
         // selection, the app rewriting the number. The sum holds only while its
@@ -10687,7 +10741,11 @@ open class WMKeyboardService : InputMethodService() {
         // setComposingText puts the whole old word back in front of whatever
         // is typed or pasted next (issue #192, SeriesGuide's movie search).
         // A caret the composed text cannot fit in front of is that case.
-        val composedText = if (wasComposing) composedPreview(_uiState.value, composing.toString()) else ""
+        val composedText = if (wasComposing) {
+            val display = _uiState.value
+            val shown = if (display.composer.glidesPinyinReadings) display.composingPreview else ""
+            if (shown.isNotEmpty() || pendingPinyinTap != null) shown else composedPreview(display, composing.toString())
+        } else ""
         // A browser may pair the current caret with the previous composing
         // bounds. Extraction alone cannot detect that mixed-age report (and
         // some editors do not support extraction). Before abandoning a visible
@@ -10716,12 +10774,14 @@ open class WMKeyboardService : InputMethodService() {
         val composingDropped = wasComposing && !staleConversionEcho && !conversionRegionReattached &&
             (cursorOutsideCandidates || cursorInsideCandidates || compositionVanished || readingLeft)
         if (composingDropped) {
+            if (pinyinGlideHandoff != null) clearPinyinGlidePreview(restoreField = false)
             if ((cursorOutsideCandidates || cursorInsideCandidates) && newSelStart == newSelEnd &&
                 candidatesEnd >= 0 && isWebEditField()
             ) {
                 armCaretSnapBackGuard(from = candidatesEnd, to = newSelStart)
             }
             composing = StringBuilder()
+            pinyinReadingSelections.clear()
             currentInputConnection?.finishComposingText()
             suggestionJob?.cancel()
             _uiState.update {
@@ -10769,6 +10829,7 @@ open class WMKeyboardService : InputMethodService() {
             }
         }
         if (composingReplaced) {
+            if (pinyinGlideHandoff != null) clearPinyinGlidePreview(restoreField = false)
             // The buffer goes and the region behind it goes with it. The
             // editor reported none — that is the branch's own condition — but
             // an editor that restyles as you type is exactly the one that
@@ -11311,6 +11372,7 @@ open class WMKeyboardService : InputMethodService() {
     }
 
     private fun finishComposingForHide() {
+        clearPinyinGlidePreview()
         // End the editor region before the framework releases the connection;
         // keep the displayed letters, without selecting or learning a candidate.
         if (_uiState.value.composer.isConversion) {
@@ -11322,8 +11384,10 @@ open class WMKeyboardService : InputMethodService() {
         composing = StringBuilder()
         readingCaret = -1
         conversionExtras = null
+        pinyinReadingSelections.clear()
+        pinyinCorrectionEvidence = emptyList()
         _uiState.update { it.copy(
-            composingPreview = "", suggestions = emptyList(), conversionReadings = emptyList(), conversionReadingHints = emptyMap(),
+            composingPreview = "", suggestions = emptyList(), conversionReadings = emptyList(), conversionReadingHints = emptyMap(), pinyinCorrectionBuffer = "", pinyinReadingCorrections = emptyMap(),
             expandedCandidates = emptyList(), candidateCursor = -1,
             emojiSuggestions = emptyList(), octopus = emptyMap(),
         ) }
@@ -12091,6 +12155,11 @@ open class WMKeyboardService : InputMethodService() {
         duetWord.active && duetShownGeneration != duetGeneration && duetJob?.isActive == true
 
     private fun handleKey(key: Key) {
+        if (key.action == KeyAction.ReadingColumn && _uiState.value.panel == PanelMode.CANDIDATES) {
+            pickConversionReading(key.output.orEmpty())
+            return
+        }
+        if (_uiState.value.pinyinGlidePreview != null) clearPinyinGlidePreview()
         if (key.action != KeyAction.Enter) pinyinEnterAt = 0L
         // A sum on a number field's keypad takes its keys before anything else
         // sees them: they are the keyboard's, not the field's. See [KeypadSum].
@@ -15451,10 +15520,15 @@ open class WMKeyboardService : InputMethodService() {
             consumeShift()
         } else if (isWordChar && composingMode && !elisionBreak) {
             if (composing.isEmpty()) reclaimLooseDigit(ic, loose, text, state)
+            val insertingMidReading = readingCaret in composing.indices
             appendComposing(text)
             // A tapped word ends at the all-thumbs-up pause too (#676).
             allUpArmed = true
-            updateComposingText(ic)
+            if (insertingMidReading) {
+                updateComposingText(ic, reusablePinyinField(ic))
+            } else {
+                updateAfterTypingKey(ic, state)
+            }
             // A trigger set to expand immediately fires on this letter, with
             // nothing after it (`btw`, `;;addr`).
             if (tryImmediateExpansion(ic, text, state)) {
@@ -17387,22 +17461,21 @@ open class WMKeyboardService : InputMethodService() {
             // being deleted all the same; the buffer path just never reaches
             // [noteDeletedForLearning].
             if (expectedSelStart > 0) declinedSpots.onDeleted(expectedSelStart - 1, expectedSelStart)
-            // Mid-reading (#960): the key in front of the caret goes, the rest
-            // of the reading stays, and at its start there is nothing to take.
+            // Mid-reading (#960): the composer can remove a whole syllable
+            // spanning the caret. At the start there is nothing to take.
             val readingAt = readingCaret
             if (readingAt in 0 until composing.length && editsInsideReading(state)) {
                 if (readingAt == 0) return
                 val whole = composing.toString()
-                val head = state.composer.backspaceBuffer(whole.substring(0, readingAt))
-                composing.setLength(0)
-                composing.append(head).append(whole, readingAt, whole.length)
+                val (edited, caret) = state.composer.backspaceReading(whole, readingAt)
+                composing.replace(0, composing.length, edited)
                 composingTouch.clear()
                 composingKeys.clear()
                 composingHints.clear()
                 ambiguousReading = null
                 phoneticKeyed = null
-                readingCaret = head.length
-                updateComposingText(ic)
+                readingCaret = caret
+                updateComposingText(ic, reusablePinyinField(ic))
                 refreshSuggestions()
                 return
             }
@@ -17459,7 +17532,7 @@ open class WMKeyboardService : InputMethodService() {
             }
             ambiguousReading = null
             phoneticKeyed = null
-            updateComposingText(ic)
+            updateAfterTypingKey(ic, state)
             refreshSuggestions()
         } else if (isNullField()) {
             // A window with no editor — what a pinned keyboard (issue #58) is
@@ -18013,81 +18086,411 @@ open class WMKeyboardService : InputMethodService() {
         val composer: Composer, val connection: InputConnection, val options: Map<String, String>, val rawOptions: Map<String, String>, var buffer: String,
         val hints: Map<String, ConversionReadingHint>, val scheme: DoublePinyin.Table, var selected: String? = null,
     )
+    private data class PinyinReadingStep(
+        val before: String,
+        val after: String,
+        val slot: Int,
+        val evidence: List<Map<String, Double>>,
+        val touches: List<TouchPoint?>?,
+        val glideChoices: ReadingGlideChoices?,
+    )
+    private val pinyinReadingSelections = ArrayDeque<PinyinReadingStep>()
+    private var pinyinCorrectionEvidence = emptyList<Map<String, Double>>()
+
     private var readingGlideChoices: ReadingGlideChoices? = null
     private var pinyinPreviewJob: Job? = null
     private var pinyinPreviewTicket=0L
+    private var pinyinPreviewSegment: Pair<Long, Long>? = null
+    private var pendingPinyinFrame: (suspend () -> Unit)? = null
     private val pinyinDecodeMutex=kotlinx.coroutines.sync.Mutex()
     // A gesture's endpoint pair repeats across many pointer samples. Rank it once.
     private var pinyinPairCacheStart=Long.MIN_VALUE
     private val pinyinPairCache=HashMap<String,List<DoublePinyinGlide.Result>>()
     private val livePinyinComposition = com.wasimaster.wmkeyboard.ime.ui.PinyinGlideComposition()
+    private var pinyinFeedbackSegment: Pair<Long, Long>? = null
 
-    private fun finishInteractivePinyin(buffer: String, connection: InputConnection) {
+    private class PinyinGlideFieldPreview(val connection: InputConnection, text: String = "", var start: Int = -1) {
+        var text = text
+            private set
+        private val earlierLengths = ArrayDeque<Int>()
+
+        fun matchesLength(length: Int): Boolean = length == text.length || length in earlierLengths
+
+        fun write(next: String): Boolean {
+            val before = text
+            if (before == next) return true
+            if (before.isNotEmpty() && before.length != next.length) {
+                if (earlierLengths.size == READING_ECHOES_MAX) earlierLengths.removeFirst()
+                earlierLengths.addLast(before.length)
+            }
+            text = next
+            val shared = before.commonPrefixWith(next).length
+            val ic = connection
+            if (start < 0 || shared == 0 || !ic.beginBatchEdit()) return ic.setComposingText(next, 1)
+            try {
+                // Replace only the changed suffix, then restore the whole composing span
+                // in the same batch so the editor draws one update.
+                val regionStart = start
+                val oldEnd = regionStart + before.length
+                if (!ic.setComposingRegion(regionStart + shared, oldEnd)) return ic.setComposingText(next, 1)
+                if (!ic.setComposingText(next.substring(shared), 1)) {
+                    return ic.setComposingRegion(regionStart, oldEnd) && ic.setComposingText(next, 1)
+                }
+                val end = regionStart + next.length
+                return ic.setComposingRegion(regionStart, end) ||
+                    (ic.finishComposingText() && ic.setSelection(regionStart, end) && ic.setComposingText(next, 1))
+            } finally {
+                ic.endBatchEdit()
+            }
+        }
+    }
+
+    private var pinyinGlideFieldPreview: PinyinGlideFieldPreview? = null
+    private var pinyinComposingField: PinyinGlideFieldPreview? = null
+    private data class PendingPinyinTap(val buffer: String, val connection: InputConnection)
+    private var pendingPinyinTap: PendingPinyinTap? = null
+
+    private fun updateAfterTypingKey(ic: InputConnection, state: KeyboardUiState) {
+        if (state.composer === CompactPinyinComposer && !emailFieldForceActive(state)) {
+            val typed = composing.toString()
+            if (CompactPinyinComposer.hasAmbiguousTaps(typed)) {
+                // Paint the resolved letters once, with their candidates.
+                pendingPinyinTap = PendingPinyinTap(typed, ic)
+                return
+            }
+        }
+        updateComposingText(ic, reusablePinyinField(ic))
+    }
+    private class PinyinGlideHandoff(
+        val buffer: String,
+        val preview: com.wasimaster.wmkeyboard.ime.ui.PinyinGlidePreview,
+    )
+    private var pinyinGlideHandoff: PinyinGlideHandoff? = null
+
+    /** Reuse a composing range only after the editor reported its bounds. */
+    private fun reusablePinyinField(ic: InputConnection): PinyinGlideFieldPreview? {
+        val state = _uiState.value
+        val text = state.composingPreview
+        val start = readingRegionStart
+        if (!state.composer.glidesPinyinReadings || state.readingInKeyboard() || text.isEmpty() ||
+            expectedSelStart != expectedSelEnd
+        ) return null
+        pinyinComposingField?.takeIf { it.connection === ic && it.text == text }?.let { return it }
+        if (start < 0 || expectedSelEnd != start + text.length) return null
+        return PinyinGlideFieldPreview(ic, text, start)
+    }
+
+    private fun showPinyinGlideReading(tail: String, connection: InputConnection): String {
+        val state = _uiState.value
+        val before = composedPreview(state, composing.toString())
+        val offset = if (readingCaret in composing.indices) {
+            state.composer.previewOffset(composing.toString(), readingCaret).coerceIn(0, before.length)
+        } else before.length
+        val text = before.replaceRange(offset, offset, tail)
+        if (tail.isEmpty()) {
+            restorePinyinGlideField()
+            return before
+        }
+        if (state.readingInKeyboard()) return text
+        val previous = pinyinGlideFieldPreview?.takeIf { it.connection === connection }
+        // A preview must not erase a text selection if the swipe is cancelled.
+        if (previous == null && expectedSelStart != expectedSelEnd) return text
+        val preview = previous ?: reusablePinyinField(connection) ?: PinyinGlideFieldPreview(connection)
+        pinyinGlideFieldPreview = preview
+        if (!preview.write(text)) pinyinGlideFieldPreview = null
+        return text
+    }
+
+    private fun restorePinyinGlideField() {
+        val preview = pinyinGlideFieldPreview ?: return
+        pinyinGlideFieldPreview = null
+        if (currentInputConnection === preview.connection) updateComposingText(preview.connection, preview)
+    }
+
+    /** Bound work to one running decode and the latest sampled frame. */
+    private fun queuePinyinFrame(frame: suspend () -> Unit) {
+        pendingPinyinFrame = frame
+        if (pinyinPreviewJob?.isActive == true) return
+        pinyinPreviewJob = serviceScope.launch {
+            while (isActive) {
+                val next = pendingPinyinFrame ?: break
+                pendingPinyinFrame = null
+                next()
+            }
+        }
+    }
+
+    private fun retirePinyinFrames() {
         pinyinPreviewTicket++
         pinyinPreviewJob?.cancel()
+        pinyinPreviewJob = null
+        pendingPinyinFrame = null
+        pinyinPreviewSegment = null
+        pinyinFeedbackSegment = null
+    }
+
+    private fun finishInteractivePinyin(
+        buffer: String,
+        connection: InputConnection,
+        choices: List<com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice> = emptyList(),
+    ) {
+        retirePinyinFrames()
         livePinyinComposition.reset()
+        val preview = pinyinGlideFieldPreview
+        pinyinGlideFieldPreview = null
+        val shown = _uiState.value.pinyinGlidePreview
         if (buffer.isNotEmpty()) {
+            val state = _uiState.value
+            val before = composing.toString()
+            val insertion = readingCaret.takeIf { it in before.indices && state.settings.cjk.pinyinCaretInReading } ?: before.length
+            fun inserted(tail: String) = before.replaceRange(insertion, insertion, tail)
             appendComposing(buffer)
-            readingGlideChoices = null
-            updateComposingText(connection)
+            val scheme = DoublePinyin.tableFor(CjkConfig.doublePinyin)
+            readingGlideChoices = if (choices.isEmpty() || scheme == null) null else ReadingGlideChoices(
+                state.composer, connection,
+                choices.associate { it.reading to inserted(it.buffer) },
+                choices.associate { it.reading to inserted(it.rawBuffer ?: it.buffer) },
+                composing.toString(),
+                choices.mapNotNull { choice -> choice.hint?.let { choice.reading to it } }.toMap(),
+                scheme,
+            )
+            updateComposingText(connection, preview)
+            // Keep the visible candidates until their selectable replacements
+            // arrive from the typing lane.
+            if (shown != null && !emailFieldForceActive(state)) {
+                val held = shown.copy(reading = _uiState.value.composingPreview, settling = true)
+                pinyinGlideHandoff = PinyinGlideHandoff(composing.toString(), held)
+                _uiState.update { it.copy(pinyinGlidePreview = held) }
+            } else {
+                _uiState.update { it.copy(pinyinGlidePreview = null) }
+            }
             refreshSuggestions()
+        } else {
+            if (preview != null) updateComposingText(connection, preview)
+            _uiState.update { it.copy(pinyinGlidePreview = null) }
         }
-        _uiState.update { it.copy(pinyinGlidePreview = null) }
+    }
+
+    /** A bounded prediction before the background search returns, or when lift adds a final turn. */
+    private fun initialPinyinChoices(
+        groups: List<String>,
+        scheme: DoublePinyin.Table?,
+        composer: Composer,
+        compact: Boolean,
+        onLift: Boolean = false,
+    ): List<com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice> {
+        val inventory = PinyinSyllables.valid
+        val dictionary = CjkDictionaries.pinyin
+        if (scheme == null) {
+            if (groups.size !in 2..6) return emptyList()
+            return inventory.asSequence().filter { reading ->
+                reading.length == groups.size && reading.indices.all { reading[it] in groups[it] }
+            }.map { it to dictionary.bestFrequency(it, 1) }.sortedByDescending { it.second }.take(8).map { (reading, _) ->
+                val buffer = if (compact) CompactPinyinComposer.predictedGlideBuffer(reading) else composer.glideBuffer(reading)
+                com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice(reading, buffer)
+            }.toList()
+        }
+        val results = if (groups.size == 2) DoublePinyinGlide.syllables(
+            groups[0], groups[1], scheme, inventory, compact, dictionary, CjkDictionaries.pinyinNgrams,
+        ) else if (compact && onLift) DoublePinyinGlide.compactPathReadings(
+            groups, scheme, inventory, dictionary, CjkDictionaries.pinyinNgrams,
+            CjkLearning.userData("pinyin"), previousWord,
+        ) else emptyList()
+        return pinyinReadingChoices(results, scheme, compact)
+    }
+
+    private fun pinyinReadingChoices(
+        results: List<DoublePinyinGlide.Result>, scheme: DoublePinyin.Table, compact: Boolean,
+    ): List<com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice> =
+        results.mapNotNull { result ->
+            DoublePinyinGlide.bufferFor(result, scheme, PinyinSyllables.valid, compact)?.let { buffer ->
+                val weight = kotlin.math.exp(((result.score - results.first().score) / 3.0).coerceIn(-12.0, 0.0)).toFloat()
+                com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice(
+                    result.reading, buffer, rawBuffer = result.raw, hint = ConversionReadingHint(weight, 0f, false),
+                )
+            }
+        }
+
+    private fun pinyinCorrectionTuning(state: KeyboardUiState): PinyinCorrection.Tuning? {
+        val correction = state.settings.correction
+        if (!correction.enabledFor(state.language.id)) return null
+        val multiplier = if (correction.adaptive) correctionStats.confidenceMultiplier() else 1.0
+        return PinyinCorrection.Tuning(correction.confidence.toDouble(), multiplier)
+    }
+
+    private fun refreshPinyinCorrectionSettings(before: KeyboardUiState) {
+        val state = _uiState.value
+        if (!state.composer.glidesPinyinReadings || state.composer !== before.composer ||
+            state.layoutId != before.layoutId || before.settings.correction == state.settings.correction
+        ) return
+        val tuning = pinyinCorrectionTuning(state)
+        if (tuning == pinyinCorrectionTuning(before)) return
+        if (state.pinyinGlidePreview != null) clearPinyinGlidePreview()
+        if (tuning == null) {
+            readingGlideChoices = readingGlideChoices?.let { old ->
+                val hints = old.hints.filterValues { !it.neighbour }
+                ReadingGlideChoices(
+                    old.composer, old.connection, old.options.filterKeys { it in hints },
+                    old.rawOptions.filterKeys { it in hints }, old.buffer, hints, old.scheme,
+                    old.selected?.takeIf { it in hints },
+                )
+            }
+        }
+        if (composing.isNotEmpty()) refreshConversionCandidates(state)
     }
 
     private fun interactivePinyinGlide(points: List<GesturePoint>,keys: List<KeyCenter>,width: Float,verdict: GlideVerdict.Pinyin) {
         val state=_uiState.value
-        if(!state.composer.glidesPinyinReadings || width<=0f || state.captureTarget()!=null) return
-        val scheme=DoublePinyin.tableFor(CjkConfig.doublePinyin) ?: return
-        if(!verdict.preview && verdict.prefix.isEmpty() && verdict.picked==null && verdict.rawTail==null && state.settings.cjk.pinyinGlideMode==1) {
-            readingGlide(points,keys,width)
-            return
-        }
+        if (!state.composer.glidesPinyinReadings || width <= 0f || state.captureTarget() != null ||
+            state.typingTestActive || state.wordSpellActive
+        ) return
+        val scheme = DoublePinyin.tableFor(CjkConfig.doublePinyin)
+        val mode = state.settings.cjk.pinyinGlideMode.takeIf { scheme != null } ?: 0
+        val correction = if (scheme != null && mode != 2) pinyinCorrectionTuning(state) else null
         val connection=currentInputConnection ?: return
+        if (pinyinGlideHandoff != null) clearPinyinGlidePreview()
         val prefix=verdict.prefix.joinToString("") { it.buffer }
         val context = listOf(connection, state.composer, state.layoutId, scheme, state.settings.cjk.pinyinGlideMode)
         val addition = livePinyinComposition.update(verdict.strokeId, context, composing.toString(), prefix)
             ?: run {
-                pinyinPreviewTicket++
-                pinyinPreviewJob?.cancel()
+                retirePinyinFrames()
+                restorePinyinGlideField()
                 _uiState.update { it.copy(pinyinGlidePreview = null) }
                 return
             }
+        // Apply a newly confirmed prefix and the explicit last choice in one edit.
+        if (!verdict.preview && (verdict.picked != null || verdict.rawTail != null || points.isEmpty())) {
+            finishInteractivePinyin(addition + (verdict.rawTail ?: verdict.picked?.buffer.orEmpty()), connection)
+            return
+        }
         // A confirmed syllable becomes composing text while the finger remains
         // down. Subsequent previews and the final lift must not insert it again.
         if (addition.isNotEmpty()) {
+            retirePinyinFrames()
+            _uiState.update { it.copy(pinyinGlidePreview = null) }
+            val preview = pinyinGlideFieldPreview
+            pinyinGlideFieldPreview = null
             appendComposing(addition)
             livePinyinComposition.recordBuffer(composing.toString())
             readingGlideChoices = null
-            updateComposingText(connection)
+            updateComposingText(connection, preview)
             refreshSuggestions()
         }
-        // An explicit answer already contains the exact buffer. Finish on
-        // this event, so the next stroke cannot cancel a queued final pick.
-        if (!verdict.preview && (verdict.picked != null || verdict.rawTail != null || points.isEmpty())) {
-            finishInteractivePinyin(verdict.rawTail ?: verdict.picked?.buffer.orEmpty(), connection)
+        if (points.isEmpty()) {
+            retirePinyinFrames()
+            restorePinyinGlideField()
+            _uiState.update { it.copy(pinyinGlidePreview = null) }
             return
         }
-        val before=composing.toString()
-        val generation=gestureGeneration.get()
-        val ticket=++pinyinPreviewTicket
-        pinyinPreviewJob?.cancel()
-        val mode=state.settings.cjk.pinyinGlideMode
-        pinyinPreviewJob=serviceScope.launch(start=if(mode==2) kotlinx.coroutines.CoroutineStart.UNDISPATCHED else kotlinx.coroutines.CoroutineStart.DEFAULT) {
-            // Exact two-key lookup is bounded to four table entries; publish it in the same UI turn.
-            val options=withContext(if(mode==2) Dispatchers.Main.immediate else Dispatchers.Default) { pinyinDecodeMutex.withLock {
-                ensureActive()
-                if(points.isEmpty() || verdict.picked!=null || verdict.rawTail!=null) emptyList() else {
-                    val map=if(mode==2) rawKeyMapFor(keys,width) else keyMapFor(keys,width)
-                    val physical=map.keyX.indices.mapNotNull { k ->
-                        val letters=('a'..'z').filter { map.keyIndex(it)==k }.joinToString("")
-                        val visual=state.layouts.letters.rows.flatten().mapNotNull { it.letters }
-                            .firstOrNull { it.length==letters.length && it.all { c -> c in letters } } ?: letters
-                        if(letters.isEmpty()) null else DoublePinyinGlide.Key(visual,map.keyX[k].toDouble(),map.keyY[k].toDouble())
+        val segment = verdict.strokeId to points.first().t
+        if (mode != 2) {
+            if (verdict.preview && pinyinPreviewSegment != segment) {
+                retirePinyinFrames()
+                restorePinyinGlideField()
+                _uiState.update { it.copy(pinyinGlidePreview = null) }
+                pinyinPreviewSegment = segment
+            }
+        }
+        val before = composing.toString()
+        val caret = readingCaret
+        val generation = gestureGeneration.get()
+        val ticket = if (mode == 2) ++pinyinPreviewTicket else pinyinPreviewTicket
+        val contextWord = previousWord
+        val compact = state.composer === CompactPinyinComposer ||
+            (state.composer as? com.wasimaster.wmkeyboard.core.input.rime.RimeComposer)?.base === CompactPinyinComposer
+        val map = if (mode == 2) rawKeyMapFor(keys, width) else keyMapFor(keys, width)
+        val layoutGroups = state.layouts.letters.rows.flatten().mapNotNull { it.letters }
+        val physical = map.keyX.indices.mapNotNull { index ->
+            val letters = ('a'..'z').filter { map.keyIndex(it) == index }.joinToString("")
+            if (letters.isEmpty()) return@mapNotNull null
+            val visual = layoutGroups.firstOrNull { it.length == letters.length && it.all { c -> c in letters } } ?: letters
+            DoublePinyinGlide.Key(visual, map.keyX[index].toDouble(), map.keyY[index].toDouble())
+        }
+        val path = points.map { DoublePinyinGlide.Point((it.x / width).toDouble(), (it.y / width).toDouble(), it.t) }
+        fun visits(stroke: List<DoublePinyinGlide.Point>) = DoublePinyinGlide.intentKeys(stroke, physical).map { physical[it].letters }
+        if (mode != 2 && !verdict.preview) {
+            val shown = _uiState.value.pinyinGlidePreview.takeIf { pinyinPreviewSegment == segment }
+            var choices = shown?.choices.orEmpty()
+            if (mode == 1 && compact && scheme != null) {
+                val groups = visits(path)
+                if (shown == null || (shown.end < path.last().t && groups != visits(path.takeWhile { it.t <= shown.end }))) {
+                    // A preview may still describe an earlier syllable when the finger is lifted.
+                    val finalChoices = if (groups.size >= 7) {
+                        pinyinReadingChoices(DoublePinyinGlide.compactLiftReadings(
+                            path, physical, scheme, PinyinSyllables.valid, CjkDictionaries.pinyin,
+                            CjkDictionaries.pinyinNgrams, CjkLearning.userData("pinyin"), contextWord,
+                        ), scheme, compact)
+                    } else initialPinyinChoices(groups, scheme, state.composer, compact, onLift = true)
+                    choices = if (groups.size < 2) emptyList() else finalChoices.ifEmpty { choices }
+                }
+            }
+            finishInteractivePinyin(choices.firstOrNull()?.buffer.orEmpty(), connection, choices)
+            return
+        }
+        fun publish(
+            options: List<com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice>,
+            words: List<String>,
+            keyCount: Int = 0,
+        ) {
+            val shown = _uiState.value.pinyinGlidePreview
+            if (shown != null && shown.start == points.first().t && shown.end > points.last().t) return
+            val tail = options.firstOrNull()?.let {
+                if (state.settings.cjk.pinyinDoublePinyinRawLetters) state.composer.composeBuffer(it.buffer) else it.reading
+            }.orEmpty()
+            // Endpoint mode can momentarily cross an invalid pair. Keep its
+            // last visible reading, but only offer choices from this frame.
+            val reading = if (tail.isEmpty() && shown != null && shown.start == points.first().t) shown.reading
+                else showPinyinGlideReading(tail, connection)
+            val visibleWords = if (options.isEmpty() && shown != null && shown.start == points.first().t) shown.words else words
+            _uiState.update { it.copy(pinyinGlidePreview = com.wasimaster.wmkeyboard.ime.ui.PinyinGlidePreview(
+                points.first().t, points.last().t, options, keyCount, reading, visibleWords,
+            )) }
+            // The initial key press already acknowledged this stroke. Cue
+            // new predictions only after a syllable has been confirmed.
+            if (verdict.prefix.isNotEmpty() && options.isNotEmpty() && pinyinFeedbackSegment != segment) {
+                pinyinFeedbackSegment = segment
+                vibrate()
+            }
+        }
+        val previewInsertion = caret.takeIf { it in before.indices && state.settings.cjk.pinyinCaretInReading }
+            ?: before.length
+        fun quickWords(choice: com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice?): List<String> {
+            if (choice == null) return emptyList()
+            val reading = if (before.isEmpty()) choice.reading else {
+                if (scheme != null && state.settings.cjk.pinyinDoublePinyinRawLetters) return emptyList()
+                val existing = composedPreview(_uiState.value, before)
+                val offset = if (previewInsertion == before.length) existing.length
+                    else state.composer.previewOffset(before, previewInsertion).coerceIn(0, existing.length)
+                existing.replaceRange(offset, offset, choice.reading).replace("'", "")
+            }
+            return CjkDictionaries.pinyin.candidates(reading, 12).map(HanVariant::localize).distinct()
+        }
+        if (mode != 2 && _uiState.value.pinyinGlidePreview == null) {
+            val initial = initialPinyinChoices(visits(path), scheme, state.composer, compact)
+            if (initial.isNotEmpty()) publish(initial, quickWords(initial.first()))
+        }
+        fun frameIsCurrent(): Boolean =
+            ticket == pinyinPreviewTicket && generation == gestureGeneration.get() &&
+                currentInputConnection === connection && _uiState.value.composer === state.composer &&
+                _uiState.value.layoutId == state.layoutId && composing.toString() == before &&
+                scheme == DoublePinyin.tableFor(CjkConfig.doublePinyin) &&
+                _uiState.value.settings.cjk.pinyinGlideMode == state.settings.cjk.pinyinGlideMode &&
+                (scheme == null || mode == 2 || correction == pinyinCorrectionTuning(_uiState.value)) &&
+                readingCaret == caret
+        suspend fun decodeFrame() {
+            val options = withContext(if (mode == 2) Dispatchers.Main.immediate else Dispatchers.Default) {
+                pinyinDecodeMutex.withLock {
+                    ensureActive()
+                    val inventory = PinyinSyllables.valid
+                    if (scheme == null) {
+                        val native = glideDecode(points, keys, width, preview = true).words
+                        val loops = PinyinGlide.loopReadings(path, physical, inventory, CjkDictionaries.pinyin, CjkDictionaries.pinyinNgrams)
+                        return@withLock (loops + native).distinct().take(8).map { reading ->
+                            val buffer = if (compact) CompactPinyinComposer.predictedGlideBuffer(reading)
+                                else state.composer.glideBuffer(reading)
+                            com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice(reading, buffer)
+                        }
                     }
-                    val path=points.map { DoublePinyinGlide.Point((it.x/width).toDouble(),(it.y/width).toDouble(),it.t) }
-                    val inventory=PinyinSyllables.valid
-                    val compact = state.composer === CompactPinyinComposer || (state.composer as? com.wasimaster.wmkeyboard.core.input.rime.RimeComposer)?.base === CompactPinyinComposer
                     val results=if(mode==2) {
                         val first=path.firstOrNull()?.let { point -> physical.minByOrNull { kotlin.math.hypot(it.x-point.x,it.y-point.y) } }
                         val last=path.lastOrNull()?.let { point -> physical.minByOrNull { kotlin.math.hypot(it.x-point.x,it.y-point.y) } }
@@ -18100,15 +18503,21 @@ open class WMKeyboardService : InputMethodService() {
                             pinyinPairCache.getOrPut(pair) { DoublePinyinGlide.exactSyllables(first.letters,last.letters,
                                 scheme,inventory,compact) }
                         }
-                    } else DoublePinyinGlide.decode(path,physical,scheme,inventory,compact,CjkDictionaries.pinyin,CjkDictionaries.pinyinNgrams,
-                        CjkLearning.userData("pinyin"))
+                    } else DoublePinyinGlide.decode(
+                        path, physical, scheme, inventory, compact, CjkDictionaries.pinyin, CjkDictionaries.pinyinNgrams,
+                        CjkLearning.userData("pinyin"), contextWord,
+                        pauseWeight = suggestionEngine?.glideTuningInForce?.unclaimedDwell?.toDouble() ?: 2.0,
+                        live = true,
+                        correction = correction,
+                    )
                     // Two-key mode has one syllable: no whole-path alignment or code inventory walk.
-                    val alignment=if(mode==2) null else DoublePinyinGlide.Search(path,physical,DoublePinyin.codesOf(scheme,inventory))
-                    results.take(8).mapNotNull { result -> (if(mode==2) {
+                    val alignment = if (mode == 2 || results.isEmpty()) null
+                        else DoublePinyinGlide.Search(path, physical, DoublePinyin.codesOf(scheme, inventory))
+                    results.mapIndexedNotNull { resultIndex, result -> (if(mode==2) {
                         DoublePinyinGlide.exactBufferFor(result,compact)
                     } else DoublePinyinGlide.bufferFor(result,scheme,inventory,compact))?.let { buffer ->
-                        val chunks=alignment?.syllableChunks(result.code) ?: listOf(path)
-                        val parts=DoublePinyinGlide.syllableBuffers(buffer,scheme,inventory,compact).mapIndexed { index,part ->
+                        val chunks = if (resultIndex < 3) alignment?.syllableChunks(result.code) ?: listOf(path) else emptyList()
+                        val parts = if (chunks.isEmpty()) emptyList() else DoublePinyinGlide.syllableBuffers(buffer,scheme,inventory,compact).mapIndexed { index,part ->
                             com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice(part.first,part.second,stroke=chunks.getOrNull(index).orEmpty().map {
                                 GesturePoint((it.x*width).toFloat(),(it.y*width).toFloat(),it.t)
                             })
@@ -18120,46 +18529,52 @@ open class WMKeyboardService : InputMethodService() {
                             val b=last?.letters?.indexOf(result.code.last()) ?: -1
                             if(a in 0..1 && b in 0..1) a*2+b else -1
                         } else -1
-                        com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice(result.reading,buffer,parts,pairSlot=pairSlot)
+                        val hint = ConversionReadingHint(
+                            kotlin.math.exp(((result.score - results.first().score) / 3.0).coerceIn(-12.0, 0.0)).toFloat() *
+                                if (result.neighbour) 0.6f else 1f,
+                            result.deviation.toFloat(), result.neighbour,
+                        )
+                        com.wasimaster.wmkeyboard.ime.ui.PinyinGlideChoice(
+                            result.reading, buffer, parts, pairSlot = pairSlot, rawBuffer = result.raw, hint = hint,
+                        )
                     } }
                 }
             }
-            }
-            if(ticket!=pinyinPreviewTicket || generation!=gestureGeneration.get() || currentInputConnection!==connection ||
-                _uiState.value.composer!==state.composer || _uiState.value.layoutId!=state.layoutId || composing.toString()!=before ||
-                scheme!=DoublePinyin.tableFor(CjkConfig.doublePinyin) || _uiState.value.settings.cjk.pinyinGlideMode!=mode) return@launch
-            if(verdict.preview) {
-                _uiState.update { it.copy(pinyinGlidePreview=com.wasimaster.wmkeyboard.ime.ui.PinyinGlidePreview(
-                    points.firstOrNull()?.t ?: 0L,points.lastOrNull()?.t ?: 0L,options,
-                    if(mode==2) {
-                        val map=rawKeyMapFor(keys,width)
-                        fun endpoint(point: GesturePoint?): Int? = point?.let { p -> map.keyX.indices.minByOrNull {
-                            kotlin.math.hypot(map.keyX[it]-p.x/width,map.keyY[it]-p.y/width)
-                        } }
-                        if(endpoint(points.firstOrNull())==endpoint(points.lastOrNull())) 1 else 2
-                    } else 0,
-                    if (points.isEmpty()) "" else {
-                        val map = rawKeyMapFor(keys, width)
-                        fun label(point: GesturePoint): String {
-                            val k = map.keyX.indices.minByOrNull {
-                                kotlin.math.hypot(map.keyX[it] - point.x / width, map.keyY[it] - point.y / width)
-                            } ?: return ""
-                            return ('a'..'z').filter { map.keyIndex(it) == k }.joinToString("")
-                        }
-                        val first = label(points.first())
-                        val last = label(points.last())
-                        val current = if (first == last) first else first + " · " + last
-                        val compact = state.composer === CompactPinyinComposer ||
-                            (state.composer as? com.wasimaster.wmkeyboard.core.input.rime.RimeComposer)?.base === CompactPinyinComposer
-                        val selected = if (compact) CompactPinyinComposer.englishKeyGroups(prefix).joinToString(" · ")
-                            else prefix.toCharArray().joinToString(" · ")
-                        listOf(selected, current).filter { it.isNotEmpty() }.joinToString(" · ").uppercase()
-                    })) }
+            if (!frameIsCurrent()) return
+            if (verdict.preview) {
+                if (options.isEmpty() && mode != 2) return
+                val keyCount = if (mode != 2) 0 else {
+                    fun endpoint(point: DoublePinyinGlide.Point) = physical.minByOrNull {
+                        kotlin.math.hypot(it.x - point.x, it.y - point.y)
+                    }
+                    if (endpoint(path.first()) == endpoint(path.last())) 1 else 2
+                }
+                val leader = options.firstOrNull()
+                // The endpoint picker stays immediate. The composer can then
+                // rank words for the complete reading without blocking touch.
+                if (mode == 2) {
+                    val previous = _uiState.value.pinyinGlidePreview?.takeIf { it.start == points.first().t }
+                    val matchingWords = previous?.words?.takeIf {
+                        leader != null && previous.choices.firstOrNull()?.buffer == leader.buffer && it.isNotEmpty()
+                    }
+                    publish(options, matchingWords ?: quickWords(leader), keyCount)
+                }
+                if (leader != null) {
+                    val predicted = before.replaceRange(previewInsertion, previewInsertion, leader.buffer)
+                    val words = onTypingLane { state.composer.candidates(predicted) }
+                    if (frameIsCurrent()) publish(options, words.ifEmpty { quickWords(leader) }, keyCount)
+                }
             } else {
                 val picked=verdict.picked ?: options.firstOrNull()
                 val buffer=verdict.rawTail ?: picked?.buffer.orEmpty()
                 finishInteractivePinyin(buffer, connection)
             }
+        }
+        if (mode == 2) {
+            pinyinPreviewJob?.cancel()
+            pinyinPreviewJob = serviceScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { decodeFrame() }
+        } else {
+            queuePinyinFrame { decodeFrame() }
         }
     }
 
@@ -18187,6 +18602,7 @@ open class WMKeyboardService : InputMethodService() {
         val connection = currentInputConnection ?: return
         val composer = state.composer
         val scheme = if (composer.glidesPinyinReadings) DoublePinyin.tableFor(CjkConfig.doublePinyin) else null
+        val correction = if (scheme != null) pinyinCorrectionTuning(state) else null
         val dictionary = CjkDictionaries.pinyin
         val ngrams = CjkDictionaries.pinyinNgrams
         val inventory = PinyinSyllables.valid
@@ -18227,6 +18643,7 @@ open class WMKeyboardService : InputMethodService() {
                         dictionary, ngrams, learning?.userData("pinyin"), context, reading.words,
                         pauseWeight = suggestionEngine?.glideTuningInForce?.unclaimedDwell?.toDouble() ?: 2.0,
                         referenceKeys = visibleKeys,
+                        correction = correction,
                     )
                     alternatives.firstOrNull()?.code ?: reading.words.firstOrNull()
                 }
@@ -18239,17 +18656,25 @@ open class WMKeyboardService : InputMethodService() {
             if (spelled.isNullOrEmpty()) return@launch
             val ic = currentInputConnection ?: return@launch
             if (ic !== connection || _uiState.value.composer !== composer || _uiState.value.layoutId != state.layoutId ||
-                (scheme != null && DoublePinyin.tableFor(CjkConfig.doublePinyin) != scheme) ||
+                (scheme != null && (DoublePinyin.tableFor(CjkConfig.doublePinyin) != scheme ||
+                    correction != pinyinCorrectionTuning(_uiState.value))) ||
                 gestureGeneration.get() != generation || composing.toString() != before) return@launch
             val map=GlideKeyMap.of(keys,keyWidthPx)
             val groups=map.keyX.indices.map { k -> ('a'..'z').filter { map.keyIndex(it)==k }.joinToString("") }
             val raw=alternatives.firstOrNull()?.raw ?: if((composer === CompactPinyinComposer || (composer as? com.wasimaster.wmkeyboard.core.input.rime.RimeComposer)?.base === CompactPinyinComposer)) CompactPinyinComposer.glideBuffer(spelled,groups) else composer.glideBuffer(spelled)
-            appendComposing(raw)
+            val insertion = readingCaret.takeIf { it in before.indices && state.settings.cjk.pinyinCaretInReading } ?: before.length
+            fun inserted(tail: String) = before.replaceRange(insertion, insertion, tail)
             val offered = alternatives.distinctBy { it.reading }.take(80)
-            val options = if(scheme==null) emptyMap() else offered.mapNotNull { result ->
-                DoublePinyinGlide.bufferFor(result,scheme,inventory,(composer === CompactPinyinComposer || (composer as? com.wasimaster.wmkeyboard.core.input.rime.RimeComposer)?.base === CompactPinyinComposer))?.let { result.reading to (before+it) }
+            val compact = composer === CompactPinyinComposer ||
+                (composer as? com.wasimaster.wmkeyboard.core.input.rime.RimeComposer)?.base === CompactPinyinComposer
+            val tails = if (scheme == null) emptyMap() else offered.mapNotNull { result ->
+                DoublePinyinGlide.bufferFor(result, scheme, inventory, compact)?.let { result.reading to it }
             }.toMap()
-            val rawOptions=offered.filter { it.reading in options }.associate { it.reading to (before+(it.raw ?: composer.glideBuffer(it.code))) }
+            appendComposing(offered.firstOrNull()?.let { tails[it.reading] } ?: raw)
+            val options = tails.mapValues { inserted(it.value) }
+            val rawOptions = offered.filter { it.reading in options }.associate {
+                it.reading to inserted(it.raw ?: composer.glideBuffer(it.code))
+            }
             val best = offered.firstOrNull()?.score ?: 0.0
             val hints = offered.filter { it.reading in options }.associate { result ->
                 result.reading to ConversionReadingHint(
@@ -20969,7 +21394,10 @@ open class WMKeyboardService : InputMethodService() {
         if (composing.isNotEmpty()) return
         val state = _uiState.value
         val composer = resolveLayout(state.settings.customLayouts, state.layoutId).resolvedComposer()
-        if (composer !== state.composer) _uiState.update { it.copy(composer = composer) }
+        if (composer !== state.composer) {
+            if (state.pinyinGlidePreview != null) clearPinyinGlidePreview()
+            _uiState.update { it.copy(composer = composer) }
+        }
     }
 
     /**
@@ -21932,14 +22360,24 @@ open class WMKeyboardService : InputMethodService() {
     private fun editsInsideReading(state: KeyboardUiState): Boolean {
         val composer = state.composer
         return composer.isConversion && composer.editsReadingInPlace && composing.isNotEmpty() &&
+            (!composer.glidesPinyinReadings || state.settings.cjk.pinyinCaretInReading) &&
             state.captureTarget() == null && composer.focusedSegment(composing.toString()) == null
     }
 
-    private fun updateComposingText(ic: InputConnection) {
+    private fun stripReadingCaret(state: KeyboardUiState, preview: String): Int =
+        if (state.readingInKeyboard() && state.composer.glidesPinyinReadings &&
+            readingCaret in composing.indices && editsInsideReading(state)
+        ) state.composer.previewOffset(composing.toString(), readingCaret).coerceIn(0, preview.length) else -1
+
+    private fun updateComposingText(
+        ic: InputConnection, glidePreview: PinyinGlideFieldPreview? = null, resolvedReading: String? = null,
+    ) {
+        pendingPinyinTap = null
         pinyinEnterAt = 0L
         // Backspaced away letter by letter: nothing left for the mark to be on.
         if (composing.isEmpty()) takeNoSpaceEnd()
-        val preview = composedPreview(_uiState.value, composing.toString())
+        val state = _uiState.value
+        val preview = resolvedReading ?: composedPreview(state, composing.toString())
         // A fragment typed into a word the user came back to rewrites itself
         // whole on every keystroke; the field-mode revision mirrors exactly that.
         revision?.takeIf { it.mode == WordRevision.Mode.FIELD }?.let { r ->
@@ -21949,8 +22387,19 @@ open class WMKeyboardService : InputMethodService() {
         // A Chinese reading kept on the strip (#973) leaves the field with no
         // region at all: an empty composing text clears one left from before
         // the setting changed, and a pick's commitText then lands at the caret.
-        val inKeyboard = _uiState.value.readingInKeyboard()
-        ic.setComposingText(if (inKeyboard) "" else segmentMarked(preview), 1)
+        val inKeyboard = state.readingInKeyboard()
+        val marked = if (inKeyboard) "" else segmentMarked(preview)
+        if (state.composer.glidesPinyinReadings && !inKeyboard && marked is String) {
+            val editor = glidePreview?.takeIf { it.connection === ic }
+            pinyinComposingField = if (editor != null) {
+                editor.takeIf { it.write(marked) && marked.isNotEmpty() }
+            } else if (ic.setComposingText(marked, 1) && marked.isNotEmpty()) {
+                PinyinGlideFieldPreview(ic, marked)
+            } else null
+        } else {
+            pinyinComposingField = null
+            ic.setComposingText(marked, 1)
+        }
         if (!inKeyboard || composing.isEmpty()) {
             hiddenReadingCaret = -1
         } else if (hiddenReadingCaret < 0) {
@@ -21967,13 +22416,14 @@ open class WMKeyboardService : InputMethodService() {
             val offset = _uiState.value.composer.previewOffset(composing.toString(), caret)
                 .coerceIn(0, preview.length)
             val at = readingRegionStart + offset
+            pinyinComposingField = null
             if (readingCaretEchoes.size >= READING_ECHOES_MAX) readingCaretEchoes.removeFirst()
             readingCaretEchoes.addLast(at)
             ic.setSelection(at, at)
-        } else {
+        } else if (!inKeyboard || !_uiState.value.composer.glidesPinyinReadings || !editsInsideReading(_uiState.value)) {
             readingCaret = -1
         }
-        _uiState.update { it.copy(composingPreview = preview) }
+        _uiState.update { it.copy(composingPreview = preview, stripReadingCaret = stripReadingCaret(it, preview)) }
         publishComposingRoman()
         publishKanaVariantReady()
     }
@@ -24667,7 +25117,7 @@ open class WMKeyboardService : InputMethodService() {
                 it.copy(
                     suggestions = words,
                     emojiSuggestions = emptyList(),
-                    conversionReadings = emptyList(), conversionReadingHints = emptyMap(),
+                    conversionReadings = emptyList(), conversionReadingHints = emptyMap(), pinyinCorrectionBuffer = "", pinyinReadingCorrections = emptyMap(),
                     autocorrectWord = null,
                     punctuationSuggestions = emptyList(),
                     inlineEmoji = false,
@@ -24689,7 +25139,7 @@ open class WMKeyboardService : InputMethodService() {
                 octopus = board,
                 suggestions = predicted.ifEmpty { nextWords },
                 emojiSuggestions = nextEmojis,
-                conversionReadings = emptyList(), conversionReadingHints = emptyMap(),
+                conversionReadings = emptyList(), conversionReadingHints = emptyMap(), pinyinCorrectionBuffer = "", pinyinReadingCorrections = emptyMap(),
                 autocorrectWord = null,
                 punctuationSuggestions = emptyList(),
                 inlineEmoji = false,
@@ -24749,6 +25199,7 @@ open class WMKeyboardService : InputMethodService() {
      */
     private fun afterConversionFlushed(predict: Boolean = false) {
         composing = StringBuilder()
+        pinyinReadingSelections.clear()
         val (nextWords, nextEmojis) = nextWordStrip()
         val predicted = if (predict) conversionPredictions(CjkContext.before) else emptyList()
         val board = predictionOctopus(_uiState.value, predicted)
@@ -24757,7 +25208,7 @@ open class WMKeyboardService : InputMethodService() {
                 octopus = board,
                 composingPreview = "",
                 suggestions = predicted.ifEmpty { nextWords },
-                conversionReadings = emptyList(), conversionReadingHints = emptyMap(),
+                conversionReadings = emptyList(), conversionReadingHints = emptyMap(), pinyinCorrectionBuffer = "", pinyinReadingCorrections = emptyMap(),
                 emojiSuggestions = nextEmojis,
                 autocorrectWord = null,
                 candidateCursor = -1,
@@ -24782,18 +25233,27 @@ open class WMKeyboardService : InputMethodService() {
         // A pick converts from the reading's start; whatever is left is edited at its end.
         readingCaret = -1
         val composer = _uiState.value.composer
-        val buf = composing.toString()
+        val offered = conversionExtras
+        val corrected = offered?.repairs?.get(chosen)
+        if (corrected != null && (offered?.typed != composing.toString() ||
+                !_uiState.value.settings.correction.enabledFor(_uiState.value.language.id))
+        ) return
+        val buf = corrected ?: composing.toString()
+        val pickIndex = if (corrected == null) index else {
+            composing = StringBuilder(corrected)
+            composer.candidates(corrected, CANDIDATE_GRID_LIMIT).indexOf(chosen)
+        }
         // By strip position when the caller knows it, which is exact even where a
         // candidate's text is reachable at two different spans; by text otherwise,
         // which is what the raw-reading fallback needs since it is in no list.
-        val consumed = if (index >= 0) {
-            composer.consumedForIndex(buf, index)
+        val consumed = if (corrected != null) buf.length else if (pickIndex >= 0) {
+            composer.consumedForIndex(buf, pickIndex)
         } else {
             composer.consumedFor(buf, chosen)
         }.coerceIn(1, buf.length)
         // A real pick from the strip or grid, or the top candidate a space
-        // took (index 0): both say this is the word. Never the raw-reading
-        // fallback, whose index is -1 and which no conversion list holds; its
+        // took (pickIndex 0): both say this is the word. Never the raw-reading
+        // fallback, whose pickIndex is -1 and which no conversion list holds; its
         // letters are learned as a Latin word instead ([learnTypedReading]).
         // Not hooked into flushConversion either — that auto-commits whatever
         // already ranked first when the reading is left some other way, so
@@ -24801,9 +25261,12 @@ open class WMKeyboardService : InputMethodService() {
         // A single character of the candidate ([piece], 以词定字) consumes the
         // candidate's whole reading but teaches nothing about the word.
         // With a later segment focused (Mozc), the segments before it go in too.
-        val written = piece ?: if (index >= 0) composer.committedText(buf, index, chosen) else chosen
-        if (index >= 0 && piece == null && learningAllowed) composer.learnChoice(buf, index)
+        val written = piece ?: if (pickIndex >= 0) composer.committedText(buf, pickIndex, chosen) else chosen
+        if (pickIndex >= 0 && piece == null && learningAllowed) composer.learnChoice(buf, pickIndex)
+        pendingPinyinTap = null
+        pinyinComposingField = null
         ic.commitText(written, 1)
+        pinyinReadingSelections.clear()
         // The rest of a reading kept on the strip now sits after the pick: read
         // again by the [updateComposingText] below (#973).
         hiddenReadingCaret = -1
@@ -24811,21 +25274,21 @@ open class WMKeyboardService : InputMethodService() {
         val rest = composer.remainderAfterCommit(composing.toString())
         if (rest.length != composing.length) composing = StringBuilder(rest)
         // The raw reading is no Chinese for the next buffer to follow on from.
-        if (index >= 0 || piece != null) CjkContext.committed(written) else CjkContext.before = ""
+        if (corrected != null || pickIndex >= 0 || piece != null) CjkContext.committed(written) else CjkContext.before = ""
         // A single character of a word (以词定字) does not spell the reading
         // it consumed, so backspace has nothing to re-pick it from.
-        if (index >= 0 && piece == null) rememberConversion(written, buf.substring(0, consumed))
+        if (pickIndex >= 0 && piece == null) rememberConversion(written, buf.substring(0, consumed))
         consumeShift()
         if (composing.isEmpty()) {
             val (nextWords, nextEmojis) = nextWordStrip()
-            val predicted = if (index >= 0 || piece != null) conversionPredictions(CjkContext.before) else emptyList()
+            val predicted = if (corrected != null || pickIndex >= 0 || piece != null) conversionPredictions(CjkContext.before) else emptyList()
             val board = predictionOctopus(_uiState.value, predicted)
             _uiState.update {
                 it.copy(
                     octopus = board,
                     composingPreview = "",
                     suggestions = predicted.ifEmpty { nextWords },
-                    conversionReadings = emptyList(), conversionReadingHints = emptyMap(),
+                    conversionReadings = emptyList(), conversionReadingHints = emptyMap(), pinyinCorrectionBuffer = "", pinyinReadingCorrections = emptyMap(),
                     emojiSuggestions = nextEmojis,
                     autocorrectWord = null,
                     // The reading is fully committed, so there is nothing left to
@@ -25001,30 +25464,68 @@ open class WMKeyboardService : InputMethodService() {
         }
         val ic = currentInputConnection ?: return
         if (composing.isEmpty()) return
-        val alternatives = liveReadingGlideChoices(composing.toString(), state.composer)
+        val typed = composing.toString()
+        val inPinyinGrid = state.panel == PanelMode.CANDIDATES && state.composer.glidesPinyinReadings
+        val alternatives = liveReadingGlideChoices(typed, state.composer)
+        val correction = if (reading.startsWith(PinyinCorrectionPrefix)) {
+            if (state.pinyinCorrectionBuffer != typed || state.panel != PanelMode.CANDIDATES) return
+            state.pinyinReadingCorrections[reading] ?: return
+        } else null
         val undoReading = reading == UndoReadingSelection
         val editSyllables = reading == EditGlideReading
-        val picked = if(undoReading) {
-            if(state.composer!==CompactPinyinComposer) return
-            CompactPinyinComposer.undoReading(composing.toString()) ?: return
-        } else if(editSyllables) {
+        val previous = pinyinReadingSelections.lastOrNull()?.takeIf { undoReading && typed.startsWith(it.after) }
+        val picked = correction?.replacement ?: if (undoReading) {
+            previous?.let { it.before + typed.substring(it.after.length) } ?: run {
+                val base = (state.composer as? com.wasimaster.wmkeyboard.core.input.rime.RimeComposer)?.base ?: state.composer
+                if (base !== CompactPinyinComposer) return
+                CompactPinyinComposer.undoReading(typed) ?: return
+            }
+        } else if (editSyllables) {
             val current = alternatives ?: return
             val selected = current.selected ?: return
             current.rawOptions[selected] ?: return
-        } else alternatives?.options?.get(reading) ?: state.composer.pickReading(composing.toString(), reading) ?: return
-        if (editSyllables || undoReading) readingGlideChoices = null else if (reading in alternatives?.options.orEmpty()) {
+        } else alternatives?.options?.get(reading) ?: state.composer.pickReading(typed, reading) ?: return
+        if (state.pinyinGlidePreview != null || pinyinGlideFieldPreview != null) {
+            clearPinyinGlidePreview(restoreField = !inPinyinGrid)
+        }
+        val touches = composingTouchFrame()
+        if (correction != null) {
+            pinyinReadingSelections.addLast(PinyinReadingStep(typed, picked, correction.slot, pinyinCorrectionEvidence, touches, alternatives))
+        } else if (previous != null) {
+            pinyinReadingSelections.removeLast()
+        } else {
+            pinyinReadingSelections.clear()
+        }
+        if (previous != null) {
+            readingGlideChoices = previous.glideChoices?.takeIf { it.buffer == picked }
+        } else if (reading in alternatives?.options.orEmpty() && !editSyllables && !undoReading) {
             alternatives?.buffer = picked
             alternatives?.selected = reading
         } else readingGlideChoices = null
-        // A different length, so the per-key twins no longer line up with the
-        // buffer; they go the way they go for any re-spelled buffer.
+        val remainingTouches = when {
+            previous != null -> previous.touches?.let { frame ->
+                frame + (touches?.drop(previous.after.length) ?: List(typed.length - previous.after.length) { null })
+            }
+            correction != null -> touches?.let { frame ->
+                val newLength = picked.length - (frame.size - (correction.end - correction.start))
+                frame.take(correction.start) + List(newLength) { null } + frame.drop(correction.end)
+            }
+            else -> null
+        }
+        if (inPinyinGrid) {
+            _uiState.update {
+                it.copy(pinyinCorrectionBuffer = "", pinyinReadingCorrections = emptyMap(), expandedCandidates = emptyList())
+            }
+        }
         composing.replace(0, composing.length, picked)
+        if (state.composer.glidesPinyinReadings) readingCaret = -1
         composingTouch.clear()
+        if (remainingTouches != null) composingTouch.addAll(remainingTouches)
         composingKeys.clear()
         composingHints.clear()
         ambiguousReading = null
         phoneticKeyed = null
-        updateComposingText(ic)
+        updateComposingText(ic, if (inPinyinGrid) null else reusablePinyinField(ic))
         refreshSuggestions()
     }
 
@@ -30131,6 +30632,7 @@ open class WMKeyboardService : InputMethodService() {
         commitResolution = null
         val typed = composing.toString()
         val composer = state.composer
+        val tap = pendingPinyinTap?.takeIf { it.buffer == typed }
         // A new reading: what is written before it is the context its first
         // word is scored after (#580 follow-up). Read once per reading, from
         // the field, since the caret may have moved since the last commit.
@@ -30138,7 +30640,11 @@ open class WMKeyboardService : InputMethodService() {
             // The reading itself is already in the field as the composing
             // text, right before the caret, so it is read and taken back off;
             // unless it is kept on the strip (#973), when the field has none.
-            val shown = if (state.readingInKeyboard()) "" else composer.composeBuffer(typed)
+            val shown = when {
+                state.readingInKeyboard() -> ""
+                tap != null -> state.composingPreview
+                else -> composer.composeBuffer(typed)
+            }
             val before = currentInputConnection?.getTextBeforeCursor(CjkContext.KEEP + shown.length, 0)?.toString().orEmpty()
             CjkContext.before = before.removeSuffix(shown)
         }
@@ -30146,7 +30652,22 @@ open class WMKeyboardService : InputMethodService() {
         if(glideChoices==null && state.conversionReadingHints.isNotEmpty()) _uiState.update { it.copy(conversionReadingHints=emptyMap()) }
         val glideReadings = glideChoices?.options?.keys.orEmpty().toList()
         val glideHints = glideChoices?.hints.orEmpty().mapValues { (reading,hint) -> hint.copy(selected=reading==glideChoices?.selected) }
+        val base = (composer as? com.wasimaster.wmkeyboard.core.input.rime.RimeComposer)?.base ?: composer
+        val compact = base === CompactPinyinComposer
+        val table = DoublePinyin.tableFor(CjkConfig.doublePinyin)
         val gridOpen = state.panel == PanelMode.CANDIDATES
+        val supportsPinyinCorrection = base === PinyinComposer || compact
+        val compactTap = compact && glideChoices == null
+        val correction = if (supportsPinyinCorrection) pinyinCorrectionTuning(state) else null
+        val buildPinyinSlots = supportsPinyinCorrection && (gridOpen || correction != null)
+        val taps = if (buildPinyinSlots) composingTouchFrame() else null
+        val touchModel = suggestionEngine?.touchModel
+        val correctionContext = previousWord
+        while (pinyinReadingSelections.isNotEmpty() && !typed.startsWith(pinyinReadingSelections.last().after)) {
+            pinyinReadingSelections.removeLast()
+        }
+        val correctionStep = pinyinReadingSelections.lastOrNull()
+        val canUndoReading = correctionStep != null || (compact && CompactPinyinComposer.canUndoReading(typed))
         refreshConversionPackOffer(state)
         // A new reading is a new list, so whatever the arrow keys had
         // highlighted in the old one no longer means anything. Reset here, on
@@ -30177,9 +30698,175 @@ open class WMKeyboardService : InputMethodService() {
             var readings = emptyList<String>()
             var board: OctopusBoard = emptyMap()
             var bias: Map<Char, Float> = emptyMap()
+            var sequentialPinyin = false
+            var readingEvidence = emptyList<Map<String, Double>>()
+            var readingCorrections = emptyMap<String, PinyinReadingCorrection>()
+            var repairs = emptyMap<String, String>()
+            var movedRepairs = emptyList<Int>()
+            var repairAt = 0
+            var settledPinyin: String? = null
             val (cands, expanded, found) = onTypingLane {
                 val cands = composer.candidates(typed)
-                readings = (composer.readings(typed) + glideReadings).distinct()
+                if (composer.glidesPinyinReadings) {
+                    // Secondary correction lookups below can replace the
+                    // composer's one retained ranking for this buffer.
+                    settledPinyin = composer.candidatePreview(typed, 0)
+                        ?: if (tap != null) composer.composeBuffer(typed) else null
+                }
+                if (buildPinyinSlots && typed.length <= 256) {
+                    data class KeyPosition(val x: Double, val y: Double, val width: Double)
+                    val positions = mutableMapOf<Char, KeyPosition>()
+                    state.layouts.letters.rows.forEachIndexed { row, keys ->
+                        var x = 0.0
+                        for (key in keys) {
+                            val letters = key.letters ?: key.output ?: key.label
+                            if (letters.length <= 2) for (c in letters.lowercase().filter { it in 'a'..'z' }) {
+                                positions[c] = KeyPosition(x + key.width / 2, row.toDouble(), key.width.toDouble())
+                            }
+                            x += key.width
+                        }
+                    }
+                    val slots = PinyinCorrection.slots(
+                        typed, table, compact, allOptions = gridOpen,
+                        maxCost = correction?.wordCostLimit ?: 0.0,
+                    ) { index, group, c ->
+                        val tap = taps?.getOrNull(index)
+                        val center = touchModel?.center(c)
+                        val pos = positions[c]
+                        when {
+                            c in group -> 0.0
+                            tap != null && center != null -> {
+                                val width = if (compact) pos?.width?.coerceAtLeast(1.0) ?: 1.0 else 1.0
+                                val d = kotlin.math.hypot((tap.x - center.x) / width, (tap.y - center.y).toDouble())
+                                1.0 + 2.0 * d * d
+                            }
+                            else -> {
+                                val d = group.mapNotNull { positions[it] }.minOfOrNull {
+                                    if (pos == null) 4.0 else {
+                                        val width = if (compact) ((it.width + pos.width) / 2).coerceAtLeast(1.0) else 1.0
+                                        kotlin.math.hypot((it.x - pos.x) / width, it.y - pos.y)
+                                    }
+                                } ?: 4.0
+                                1.5 + d * d * 2.0
+                            }
+                        }
+                    }.mapIndexed { index, slot ->
+                        if (correctionStep != null && index <= correctionStep.slot) slot.copy(locked = true) else slot
+                    }
+                    val suggestions = if (correction == null) emptyList() else {
+                        PinyinCorrection.words(typed, slots, CjkDictionaries.pinyin, correctionContext,
+                            correction.wordCostLimit, doublePinyin = table != null)
+                    }
+                    if (gridOpen && slots.isNotEmpty()) {
+                        sequentialPinyin = true
+                        val index = correctionStep?.let { it.slot + 1 } ?: 0
+                        readingEvidence = when {
+                            correctionStep != null -> correctionStep.evidence
+                            table != null && glideChoices != null -> {
+                                val paths = glideChoices.options.entries.mapNotNull { (reading, buffer) ->
+                                    val weight = glideHints[reading]?.weight?.toDouble() ?: return@mapNotNull null
+                                    val syllables = DoublePinyinGlide.syllableBuffers(buffer, table, PinyinSyllables.valid, compact)
+                                    if (syllables.size == slots.size) syllables to weight else null
+                                }
+                                slots.indices.map { slotIndex ->
+                                    paths.groupingBy { it.first[slotIndex].first }
+                                        .fold(0.0) { best, path -> maxOf(best, path.second) }
+                                }
+                            }
+                            else -> emptyList()
+                        }
+                        val slot = slots.getOrNull(index)
+                        if (slot != null) {
+                            val weights = readingEvidence.getOrNull(index).orEmpty()
+                            val weightedSlot = slot.copy(options = slot.options.map { option ->
+                                val weight = weights[option.reading] ?: return@map option
+                                option.copy(cost = minOf(option.cost, 0.75 - kotlin.math.ln(weight.coerceIn(0.001, 1.0))))
+                            })
+                            val rankedSlots = slots.toMutableList().apply { set(index, weightedSlot) }
+                            val alternatives = PinyinCorrection.readingChoices(
+                                rankedSlots, CjkDictionaries.pinyin, suggestions, slot.start,
+                            ).map { it.option }
+                            val original = slot.options.firstOrNull { it.reading == slot.reading && slot.complete }
+                            readingCorrections = (listOfNotNull(original) + alternatives).associate { option ->
+                                val replacement = if (option == original && !compact) typed else slot.replaceIn(typed, option)
+                                "$PinyinCorrectionPrefix$index:${option.reading}:$typed" to PinyinReadingCorrection(
+                                    option.reading, index, replacement, slot.start, slot.end,
+                                )
+                            }
+                        }
+                    }
+                    if (suggestions.isNotEmpty()) {
+                        val existing = if (table != null && !compactTap) cands.take(2).toHashSet()
+                            else composer.candidates(typed, CANDIDATE_GRID_LIMIT).toHashSet()
+                        repairs = suggestions.asSequence().filter { it.text !in existing }.take(3).associate { word ->
+                            word.text to word.replaceIn(typed, slots)
+                        }
+                    } else if (correction != null && composer !== base && CjkDictionaries.pinyin.isEmpty &&
+                        slots.size in 1..16 && PinyinCorrection.coversBuffer(typed, slots)) {
+                        // A Rime-only installation can look up nearby spellings in its active schema.
+                        val alternates = slots.flatMap { slot ->
+                            if (slot.locked) emptyList() else slot.options.filter {
+                                it.reading != slot.reading && it.cost <= correction.wordCostLimit
+                            }.take(3).map { slot to it }
+                        }.sortedBy { it.second.cost }.take(4)
+                        val existing = composer.candidates(typed, CANDIDATE_GRID_LIMIT).toHashSet()
+                        repairs = buildMap {
+                            for ((slot, option) in alternates) {
+                                val corrected = slot.replaceIn(typed, option)
+                                val words = composer.candidates(corrected, 3)
+                                for ((index, word) in words.withIndex()) {
+                                    if (word !in existing && word.codePointCount(0, word.length) == slots.size &&
+                                        CjkContext.hanTail(word) == word &&
+                                        composer.consumedForIndex(corrected, index) == corrected.length) putIfAbsent(word, corrected)
+                                    if (size == 3) break
+                                }
+                                if (size == 3) break
+                            }
+                        }
+                        composer.candidates(typed)
+                    }
+                }
+                if (compact && table != null && glideChoices != null) {
+                    val leader = glideChoices.options.entries.firstOrNull { it.value == typed }
+                    val raw = glideChoices.rawOptions[leader?.key]
+                    val syllables = DoublePinyinGlide.syllableBuffers(typed, table, PinyinSyllables.valid, compact)
+                    if (leader != null && raw != null && syllables.size >= 4) {
+                        // Different readings of the same keys belong in the word strip
+                        // too, so a valid long reading does not require a manual syllable edit.
+                        val existing = (cands + repairs.keys).toHashSet()
+                        val alternatives = glideChoices.options.asSequence().filter { (reading, buffer) ->
+                            buffer != typed && glideChoices.rawOptions[reading] == raw
+                        }.map { it.value }.distinct().take(3)
+                        val words = buildMap {
+                            for (buffer in alternatives) {
+                                val options = composer.candidates(buffer, 4)
+                                for ((index, word) in options.withIndex()) {
+                                    if (size == 3) break
+                                    if (word.codePointCount(0, word.length) != syllables.size || CjkContext.hanTail(word) != word ||
+                                        composer.consumedForIndex(buffer, index) != buffer.length) continue
+                                    if (existing.add(word)) put(word, buffer)
+                                }
+                                if (size == 3) break
+                            }
+                        }
+                        repairs = words + repairs
+                    }
+                }
+                if (repairs.isNotEmpty()) {
+                    repairAt = minOf(if (table != null) 2 else 3, cands.size)
+                    if (compactTap) {
+                        val complete = cands.indices.takeWhile { composer.consumedForIndex(typed, it) == typed.length }.size
+                        repairAt = maxOf(repairAt, complete)
+                    }
+                    movedRepairs = composer.candidates(typed, CANDIDATE_GRID_LIMIT).mapIndexedNotNull { index, word ->
+                        index.takeIf { word in repairs }
+                    }
+                }
+                readings = when {
+                    sequentialPinyin -> emptyList()
+                    gridOpen && composer.glidesPinyinReadings -> composer.readings(typed)
+                    else -> (composer.readings(typed) + glideReadings).distinct()
+                }
                 // Autopilot's keys: the Hanzi share no letters with the reading,
                 // so the readings behind them say what comes next (#1100).
                 if (conversionAutopilot(state)) {
@@ -30213,12 +30900,31 @@ open class WMKeyboardService : InputMethodService() {
                 at = found.at,
                 englishEmoji = emoji.filter { it.second }.mapTo(HashSet()) { it.first },
                 shortcuts = conversionShortcuts(state, typed),
+                repairs = repairs, repairAt = repairAt, movedRepairs = movedRepairs,
             )
             conversionExtras = extras
+            pinyinCorrectionEvidence = readingEvidence
+            val handoff = pinyinGlideHandoff?.takeIf {
+                it.buffer == typed && it.preview === _uiState.value.pinyinGlidePreview
+            }
+            if (handoff != null) pinyinGlideHandoff = null
+            val rankedReading = if (composer.glidesPinyinReadings) settledPinyin else composer.candidatePreview(typed, 0)
+            val showTap = tap != null && pendingPinyinTap === tap && tap.connection === currentInputConnection
+            if (composer.glidesPinyinReadings && pinyinGlideFieldPreview == null && rankedReading != null &&
+                _uiState.value.candidateCursor < 0 &&
+                (showTap || (tap == null && rankedReading != _uiState.value.composingPreview))
+            ) {
+                currentInputConnection?.let { ic ->
+                    updateComposingText(ic, if (gridOpen) null else reusablePinyinField(ic), resolvedReading = rankedReading)
+                }
+            }
             _uiState.update {
                 it.copy(
                     suggestions = extras.into(cands),
-                    conversionReadings = (if((composer === CompactPinyinComposer || (composer as? com.wasimaster.wmkeyboard.core.input.rime.RimeComposer)?.base === CompactPinyinComposer) && CompactPinyinComposer.canUndoReading(typed)) listOf(UndoReadingSelection) else emptyList()) + readings,
+                    pinyinGlidePreview = if (handoff != null) null else it.pinyinGlidePreview,
+                    conversionReadings = (if (canUndoReading) listOf(UndoReadingSelection) else emptyList()) + readings,
+                    pinyinCorrectionBuffer = if (gridOpen && it.panel == PanelMode.CANDIDATES) typed else "",
+                    pinyinReadingCorrections = if (it.panel == PanelMode.CANDIDATES) readingCorrections else emptyMap(),
                     conversionReadingHints = glideHints,
                     autocorrectWord = null,
                     expandedCandidates = extras.into(expanded),
@@ -30229,7 +30935,7 @@ open class WMKeyboardService : InputMethodService() {
                     nextLetterBias = bias,
                 )
             }
-            if (composer.candidatePreview(typed, 0) != null) {
+            if (!composer.glidesPinyinReadings && rankedReading != null) {
                 currentInputConnection?.let(::updateComposingText)
             }
         }
@@ -30265,19 +30971,34 @@ open class WMKeyboardService : InputMethodService() {
         val englishEmoji: Set<String>,
         /** Chips at the very end of the strip, by their text (#1029). */
         val shortcuts: Map<String, ConversionShortcut> = emptyMap(),
+        val repairs: Map<String, String> = emptyMap(),
+        val repairAt: Int = 0,
+        private val movedRepairs: List<Int> = emptyList(),
     ) {
         /** [candidates] with the English words in their place and the shortcuts behind them all. */
         fun into(candidates: List<String>): List<String> {
-            if (english.isEmpty()) return candidates + shortcuts.keys
-            val cut = at.coerceAtMost(candidates.size)
-            return candidates.take(cut) + english + candidates.drop(cut) + shortcuts.keys
+            if (english.isEmpty() && repairs.isEmpty()) return candidates + shortcuts.keys
+            val remaining = if (movedRepairs.isEmpty()) candidates else candidates.filterNot { it in repairs }
+            val cut = englishPosition.coerceAtMost(remaining.size)
+            val ranked = remaining.take(cut) + english + remaining.drop(cut)
+            val insertion = repairPosition.coerceAtMost(ranked.size)
+            return ranked.take(insertion) + repairs.keys + ranked.drop(insertion) + shortcuts.keys
         }
 
         /** The composer's own index for strip position [index]; -1 for an English chip. */
-        fun composerIndex(index: Int): Int = when {
-            english.isEmpty() || index < at -> index
-            index < at + english.size -> -1
-            else -> index - english.size
+        private val englishPosition get() = at - movedRepairs.count { it < at }
+        private val repairPosition get() = repairAt - movedRepairs.count { it < repairAt } + if (at <= repairAt) english.size else 0
+
+        fun composerIndex(index: Int): Int {
+            if (index in repairPosition until repairPosition + repairs.size) return -1
+            val original = if (index >= repairPosition + repairs.size) index - repairs.size else index
+            var candidate = when {
+                english.isEmpty() || original < englishPosition -> original
+                original < englishPosition + english.size -> return -1
+                else -> original - english.size
+            }
+            for (moved in movedRepairs) if (moved <= candidate) candidate++
+            return candidate
         }
     }
 
@@ -31641,6 +32362,7 @@ open class WMKeyboardService : InputMethodService() {
      * by position rather than by text — see [Composer.consumedForIndex].
      */
     fun onCandidateTapped(candidate: String, index: Int) {
+        if (_uiState.value.pinyinGlidePreview != null) clearPinyinGlidePreview()
         // The pages grid's own "back to the keys" row (#385).
         if (index < 0 && candidate.isEmpty()) {
             onSuggestionPagesToggle(false)
@@ -31648,7 +32370,11 @@ open class WMKeyboardService : InputMethodService() {
         }
         if (takeHomophone(candidate)) return
         val ic = currentInputConnection ?: return
-        val composer = _uiState.value.composer
+        val state = _uiState.value
+        val composer = state.composer
+        if (state.panel == PanelMode.CANDIDATES && composer.glidesPinyinReadings && composing.isNotEmpty()) {
+            if (state.pinyinCorrectionBuffer != composing.toString() || candidate !in state.expandedCandidates) return
+        }
         if (!composer.isConversion) {
             // A word picked from the pages grid (#385): the grid goes, and the
             // pick is an ordinary strip pick.
@@ -31763,11 +32489,14 @@ open class WMKeyboardService : InputMethodService() {
         _uiState.update {
             it.copy(
                 panel = PanelMode.CANDIDATES,
+                pinyinCorrectionBuffer = "",
+                pinyinReadingCorrections = emptyMap(),
                 // The same positions as the strip, English words and all, so a
                 // pick from either resolves the same way.
                 expandedCandidates = conversionExtras?.takeIf { e -> e.typed == typed }?.into(grid) ?: grid,
             )
         }
+        refreshConversionCandidates(_uiState.value)
     }
 
     /**
@@ -32552,6 +33281,7 @@ open class WMKeyboardService : InputMethodService() {
             return
         }
         val ic = currentInputConnection ?: return
+        if (_uiState.value.pinyinGlidePreview != null) clearPinyinGlidePreview()
         caretStepFeedback()
         // Mark the scrub so the caret's landing spot doesn't resume-compose the
         // word under it mid-drag (this same commit would then churn it).
@@ -32770,11 +33500,17 @@ open class WMKeyboardService : InputMethodService() {
             stepSegmentBy(resize = false, delta = delta)
             return true
         }
-        if (!editsInsideReading(state) || state.readingInKeyboard() || readingRegionStart < 0) return false
+        if (!editsInsideReading(state)) return false
+        val onStrip = state.readingInKeyboard()
+        if (onStrip && !state.composer.glidesPinyinReadings || !onStrip && readingRegionStart < 0) return false
         val from = if (readingCaret in buffer.indices) readingCaret else buffer.length
-        val to = (from + delta).coerceIn(0, buffer.length)
+        val to = state.composer.moveReadingIndex(buffer, from, delta)
         if (to == from) return true
         readingCaret = if (to == buffer.length) -1 else to
+        if (onStrip) {
+            _uiState.update { it.copy(stripReadingCaret = stripReadingCaret(it, it.composingPreview)) }
+            return true
+        }
         val offset = state.composer.previewOffset(buffer, to).coerceIn(0, state.composingPreview.length)
         val at = readingRegionStart + offset
         if (readingCaretEchoes.size >= READING_ECHOES_MAX) readingCaretEchoes.removeFirst()
@@ -34490,10 +35226,12 @@ open class WMKeyboardService : InputMethodService() {
             previewChain.add(points)
             return
         }
-        // A Pinyin or kana swipe previews nothing: what it decodes is a
-        // reading, which the strip shows converted once the finger lifts
-        // (#580, #958).
-        if (state.composer.glidesPinyinReadings || state.composer.glidesKanaReadings) return
+        if (state.composer.glidesPinyinReadings) {
+            if (state.captureTarget() != null || state.typingTestActive || state.wordSpellActive) return
+            interactivePinyinGlide(points, keys, keyWidthPx, GlideVerdict.Pinyin(preview = true, strokeId = points.first().t))
+            return
+        }
+        if (state.composer.glidesKanaReadings) return
         syncGlideTriggers(state)
         if (swipeJoinsWord(state)) noteLiveDuetStroke(points)
         gesturePreviews.trySend(
@@ -34536,11 +35274,13 @@ open class WMKeyboardService : InputMethodService() {
             // stroke they came from. Only this coroutine touches them.
             val finished = ArrayList<GlideReading>()
             var finishedGeneration = -1
+            var feedbackSegment = -1
             for (request in gesturePreviews) {
                 if (request.generation != gestureGeneration.get()) continue
                 if (finishedGeneration != request.generation) {
                     finished.clear()
                     finishedGeneration = request.generation
+                    feedbackSegment = -1
                 }
                 // Paced at the end of the loop: see GLIDE_PREVIEW_PACE_FROM_MS.
                 val readFrom = SystemClock.uptimeMillis()
@@ -34641,6 +35381,10 @@ open class WMKeyboardService : InputMethodService() {
                         },
                         glideCloseCall = steadied.closeCall,
                     )
+                }
+                if (feedbackSegment != request.chain.size) {
+                    feedbackSegment = request.chain.size
+                    if (feedbackSegment > 0) vibrate()
                 }
                 // A preview that took long gets as long again before the next
                 // one starts. The board asks for one every 40 ms, and where a
@@ -34764,11 +35508,16 @@ open class WMKeyboardService : InputMethodService() {
      * strip's suggestions are left to the caller: a commit replaces them, a
      * cancel restores them.
      */
-    private fun clearGlidePreview() {
+    private fun clearPinyinGlidePreview(restoreField: Boolean = true) {
         livePinyinComposition.reset()
-        pinyinPreviewTicket++
-        pinyinPreviewJob?.cancel()
-        _uiState.update { if(it.pinyinGlidePreview==null) it else it.copy(pinyinGlidePreview=null) }
+        retirePinyinFrames()
+        pinyinGlideHandoff = null
+        if (restoreField) restorePinyinGlideField() else pinyinGlideFieldPreview = null
+        _uiState.update { if (it.pinyinGlidePreview == null) it else it.copy(pinyinGlidePreview = null) }
+    }
+
+    private fun clearGlidePreview() {
+        clearPinyinGlidePreview()
         // Every exit from a stroke comes through here, so the steadiness gate
         // is reset here too: a new stroke must never inherit the last one's
         // word, or its first reading would be judged against a stranger.
@@ -35869,11 +36618,15 @@ open class WMKeyboardService : InputMethodService() {
         verdict: GlideVerdict = GlideVerdict.Leader(),
     ) {
         if(verdict is GlideVerdict.Pinyin) {
-            if(glideAllowed(_uiState.value) && keys.isNotEmpty()) interactivePinyinGlide(points,keys,keyWidthPx,verdict)
+            if (glideAllowed(_uiState.value) && keys.isNotEmpty()) {
+                interactivePinyinGlide(points, keys, keyWidthPx, verdict)
+            } else if (_uiState.value.pinyinGlidePreview != null) {
+                clearPinyinGlidePreview()
+            }
             return
         }
         if (verdict is GlideVerdict.Cancel) {
-            livePinyinComposition.reset()
+            clearPinyinGlidePreview()
         }
         // This stroke is lifted: it joins the word's gestures, not the live ones.
         points.firstOrNull()?.let { liveDuetStrokes.remove(it.t) }
@@ -35910,6 +36663,12 @@ open class WMKeyboardService : InputMethodService() {
                 target, listOf(points), keys, keyWidthPx, verdict,
                 shiftForGlide(state.shiftState, verdict.caseAt(0)),
             )
+            return
+        }
+
+        val previewedStroke = pinyinPreviewSegment?.first
+        if (state.composer.glidesPinyinReadings && previewedStroke != null && previewedStroke == points.firstOrNull()?.t) {
+            interactivePinyinGlide(points, keys, keyWidthPx, GlideVerdict.Pinyin(strokeId = previewedStroke))
             return
         }
 
@@ -42695,6 +43454,7 @@ open class WMKeyboardService : InputMethodService() {
                 commitDuet(ic)
             }
         }
+        val beforeSettingsUpdate = _uiState.value
         _uiState.update {
             it.copy(
                 settings = settings,
@@ -42704,6 +43464,7 @@ open class WMKeyboardService : InputMethodService() {
                 activeSymbolSetId = null,
             )
         }
+        refreshPinyinCorrectionSettings(beforeSettingsUpdate)
         // A space held back for the next letter (#679) is not owed under a
         // mode whose every space is the user's (#1234).
         if (!settings.gesture.autoSpaceAfterGlide && !settings.suggestionStrip.autoSpaceAfterSuggestion) {
@@ -55268,10 +56029,14 @@ open class WMKeyboardService : InputMethodService() {
         }
         val ic = currentInputConnection ?: return
         if (haptic) vibrate()
-        if (stepSegment(action, extendSelection || _uiState.value.selectingText)) return
+        val selecting = extendSelection || _uiState.value.selectingText
+        if (stepSegment(action, selecting)) return
+        if (!selecting && _uiState.value.composer.glidesPinyinReadings &&
+            (action == TextEditAction.LEFT || action == TextEditAction.RIGHT) &&
+            stepInsideReading(ic, if (action == TextEditAction.LEFT) -1 else 1)
+        ) return
         endCompositionForCaretKey(ic)
         lastGestureWord = null
-        val selecting = extendSelection || _uiState.value.selectingText
         if (action in CARET_EDIT_ACTIONS) lastCaretScrubMs = SystemClock.uptimeMillis()
         when (action) {
             TextEditAction.LEFT -> sendEditorKey(KeyEvent.KEYCODE_DPAD_LEFT, selecting)
@@ -61475,6 +62240,12 @@ open class WMKeyboardService : InputMethodService() {
         val state = _uiState.value
         if (composing.isEmpty() || !state.composer.isConversion || state.captureTarget() != null) return false
         val highlighted = state.candidateCursor >= 0
+        if (state.composer.glidesPinyinReadings && event.hasNoModifiers() &&
+            (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) &&
+            currentInputConnection?.let {
+                stepInsideReading(it, if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1)
+            } == true
+        ) return true
         // Mozc's segments, as on a desktop: Shift+Left/Right resize the
         // focused one, and once the reading is split Left/Right move the
         // focus, with Up/Down left to step through its candidates.

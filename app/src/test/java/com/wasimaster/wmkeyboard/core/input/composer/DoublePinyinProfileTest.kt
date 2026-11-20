@@ -1,5 +1,6 @@
 package com.wasimaster.wmkeyboard.core.input.composer
 
+import com.wasimaster.wmkeyboard.app.doublePinyinStartText
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -29,6 +30,23 @@ class DoublePinyinProfileTest {
             assertEquals(scheme.name, table.finals, parsed.table.finals)
             assertEquals(scheme.name, table.zeroLeads, parsed.table.zeroLeads)
             assertEquals(scheme.name, table.codes, parsed.table.codes)
+        }
+    }
+
+    @Test
+    fun startingFromABuiltInSchemeKeepsLiteralAliasesInTheSetting() {
+        val saved = CjkConfig.doublePinyinLiteralFinals
+        try {
+            val inventory = valid + setOf("ao", "o")
+            CjkConfig.doublePinyinLiteralFinals = true
+            CjkConfig.customDoublePinyin = doublePinyinStartText(DoublePinyinScheme.XIAOHE, "Xiaohe")!!
+            val enabled = DoublePinyin.tableFor(DoublePinyinScheme.CUSTOM)!!
+            assertEquals("ao", DoublePinyin.translate("ao", enabled, inventory))
+            CjkConfig.doublePinyinLiteralFinals = false
+            val disabled = DoublePinyin.tableFor(DoublePinyinScheme.CUSTOM)!!
+            assertEquals("o", DoublePinyin.translate("ao", disabled, inventory))
+        } finally {
+            CjkConfig.doublePinyinLiteralFinals = saved
         }
     }
 

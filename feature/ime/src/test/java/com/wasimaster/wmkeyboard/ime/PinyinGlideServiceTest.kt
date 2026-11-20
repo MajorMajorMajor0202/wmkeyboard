@@ -1,11 +1,13 @@
 package com.wasimaster.wmkeyboard.ime
 
 import com.wasimaster.wmkeyboard.core.gesture.GesturePoint
+import com.wasimaster.wmkeyboard.core.gesture.KeyCenter
 import com.wasimaster.wmkeyboard.core.input.composer.CjkConfig
 import com.wasimaster.wmkeyboard.core.input.composer.CjkDictionaries
 import com.wasimaster.wmkeyboard.core.input.composer.ConversionDictionary
 import com.wasimaster.wmkeyboard.core.input.composer.DoublePinyin
 import com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinScheme
+import com.wasimaster.wmkeyboard.core.input.composer.Jianpin
 import com.wasimaster.wmkeyboard.core.input.composer.PinyinSyllables
 import com.wasimaster.wmkeyboard.core.input.composer.resolvedComposer
 import com.wasimaster.wmkeyboard.core.layout.BuiltInLayouts
@@ -19,10 +21,12 @@ import com.wasimaster.wmkeyboard.core.layout.script
 import com.wasimaster.wmkeyboard.core.prediction.SuggestionEngine
 import com.wasimaster.wmkeyboard.core.prediction.Trie
 import com.wasimaster.wmkeyboard.core.prediction.UserLexicon
+import com.wasimaster.wmkeyboard.core.settings.AutocorrectSettings
 import com.wasimaster.wmkeyboard.core.settings.HapticSettings
 import com.wasimaster.wmkeyboard.core.settings.KeyboardSettings
 import com.wasimaster.wmkeyboard.core.settings.OneHandedMode
 import com.wasimaster.wmkeyboard.core.transliteration.BengaliPhoneticIndex
+import com.wasimaster.wmkeyboard.ime.ui.GlideVerdict
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.cancel
 import org.junit.After
@@ -53,15 +57,22 @@ class PinyinGlideServiceTest {
         PinyinSyllables.valid = emptySet()
         CjkDictionaries.pinyin = ConversionDictionary.EMPTY
         CjkConfig.doublePinyin = DoublePinyinScheme.OFF
+        CjkConfig.doublePinyinSyllableDelete = false
     }
 
-    private fun keyboard(spec: LayoutSpec, scheme: DoublePinyinScheme): Pair<GlideKeyboard, RecordingEditor> {
+    private fun keyboard(
+        spec: LayoutSpec,
+        scheme: DoublePinyinScheme,
+        correction: AutocorrectSettings = AutocorrectSettings(),
+        editor: RecordingEditor = RecordingEditor(),
+    ): Pair<GlideKeyboard, RecordingEditor> {
         CjkConfig.doublePinyin = scheme
-        val editor = RecordingEditor()
         val service = GlideKeyboard(editor)
         services += service
         plantPersonalStores(service)
-        val settings = KeyboardSettings(learnFromTyping = false, haptics = HapticSettings(enabled = false))
+        val settings = KeyboardSettings(
+            learnFromTyping = false, haptics = HapticSettings(enabled = false), correction = correction,
+        )
         val layouts = LayoutSet(spec.compile(LayoutLayer.LETTERS), spec.compile(LayoutLayer.SYMBOLS), spec.compile(LayoutLayer.SYMBOLS_SHIFTED))
         seedState(service, glideReadyState(glideReady = false, fieldNoSuggestions = false,
             settings = settings.copy(cjk = settings.cjk.copy(pinyinDoublePinyin = scheme))).copy(
@@ -185,6 +196,27 @@ class PinyinGlideServiceTest {
         assertEquals("ma",editor.text.toString())
     }
 
+    @Test fun `global and language autocorrect switches retain direct readings and manual syllable choices`() {
+        PinyinSyllables.valid = setOf("na", "ma")
+        CjkDictionaries.pinyin = ConversionDictionary.parse(sequenceOf("na\t\u90a3\t100", "ma\t\u5988\t100", "mama\t\u5988\u5988\t10"))
+        val spec = BuiltInLayouts.COMPACT_PINYIN
+        val settings = listOf(AutocorrectSettings(enabled = false), AutocorrectSettings(offLanguages = setOf(spec.language().id)))
+        for (correction in settings) {
+            val (service, editor) = keyboard(spec, DoublePinyinScheme.XIAOHE, correction)
+            swipe(service, "na", "\u90a3")
+            assertEquals("na", editor.text.toString())
+            assertTrue(service.uiState.value.conversionReadingHints.values.none { it.neighbour })
+            assertTrue("\u5988" !in service.uiState.value.suggestions)
+
+            service.onCandidatesExpand()
+            settle { service.uiState.value.pinyinReadingCorrections.isNotEmpty() }
+            val alternate = service.uiState.value.pinyinReadingCorrections.entries.single { it.value.reading == "ma" }.key
+            service.onKey(com.wasimaster.wmkeyboard.core.layout.Key("ma", output = alternate, action = KeyAction.ReadingColumn))
+            settle { service.uiState.value.suggestions.firstOrNull() == "\u5988" }
+            assertEquals("ma", editor.text.toString())
+        }
+    }
+
     @Test fun `candidate ranking and highlight synchronize the field reading`() {
         PinyinSyllables.valid = inventory + "nin"
         CjkDictionaries.pinyin = ConversionDictionary.parse(sequenceOf(
@@ -211,9 +243,12 @@ class PinyinGlideServiceTest {
         ))
         val (service, _) = keyboard(BuiltInLayouts.COMPACT_PINYIN, DoublePinyinScheme.XIAOHE)
         swipe(service, "nihc")
-        assertTrue("ni" in service.uiState.value.conversionReadings)
-        assertTrue("bi" in service.uiState.value.conversionReadings)
-        service.onKey(com.wasimaster.wmkeyboard.core.layout.Key("bi", output = "bi", action = KeyAction.ReadingColumn))
+        service.onCandidatesExpand()
+        settle { service.uiState.value.pinyinReadingCorrections.isNotEmpty() }
+        val choices = service.uiState.value.pinyinReadingCorrections
+        assertTrue(choices.values.any { it.reading == "ni" && it.slot == 0 })
+        val alternate = choices.entries.single { it.value.reading == "bi" && it.value.slot == 0 }.key
+        service.onKey(com.wasimaster.wmkeyboard.core.layout.Key("bi", output = alternate, action = KeyAction.ReadingColumn))
         settle { "鼻好" in service.uiState.value.suggestions && "你好" !in service.uiState.value.suggestions }
         assertTrue("鼻好" in service.uiState.value.suggestions)
         assertTrue("你好" !in service.uiState.value.suggestions)
@@ -345,7 +380,7 @@ class PinyinGlideServiceTest {
         assertEquals(OneHandedMode.RIGHT, service.uiState.value.settings.oneHandedMode)
     }
 
-    @Test fun `thirteen key preview never edits field and confirmed repeated key retains selected reading`() {
+    @Test fun `thirteen key preview composes in the field and confirms a repeated key once`() {
         PinyinSyllables.valid=setOf("mian")
         CjkDictionaries.pinyin=ConversionDictionary.parse(sequenceOf("mian\t绵\t100","mianmian\t绵绵\t1000"))
         val (service,editor)=keyboard(BuiltInLayouts.PINYIN_13,DoublePinyinScheme.XIAOHE)
@@ -356,7 +391,8 @@ class PinyinGlideServiceTest {
         val points=listOf(GesturePoint(0f,0f,100),GesturePoint(0f,0f,500))
         service.onGesture(points,keys,GLIDE_KEY_WIDTH,com.wasimaster.wmkeyboard.ime.ui.GlideVerdict.Pinyin(preview=true))
         settle { service.uiState.value.pinyinGlidePreview!=null }
-        assertEquals("",editor.text.toString())
+        assertEquals("mian",editor.text.toString())
+        assertTrue(editor.commits.isEmpty())
         val choice=service.uiState.value.pinyinGlidePreview!!.choices.first()
         assertEquals("mian",choice.reading)
         service.onGesture(emptyList(),keys,GLIDE_KEY_WIDTH,
@@ -385,10 +421,355 @@ class PinyinGlideServiceTest {
             // The bounded lookup must publish without pumping the main looper.
             val first=service.uiState.value.pinyinGlidePreview!!
             assertTrue(first.choices.toString(),first.choices.any { it.reading=="ni" })
-            assertEquals("",editor.text.toString())
+            assertEquals(first.choices.first().reading, editor.text.toString())
+            assertTrue(editor.commits.isEmpty())
             val transit=endpoints.take(1)+listOf(GesturePoint(50f,0f,150))+endpoints.takeLast(1)
             service.onGesture(transit,keys,GLIDE_KEY_WIDTH,com.wasimaster.wmkeyboard.ime.ui.GlideVerdict.Pinyin(preview=true))
             assertEquals(first.choices.map { Triple(it.reading,it.buffer,it.pairSlot) },service.uiState.value.pinyinGlidePreview!!.choices.map { Triple(it.reading,it.buffer,it.pairSlot) })
+        }
+    }
+
+    @Test fun `endpoint previews keep their prefix through edits and invalid pairs`() {
+        PinyinSyllables.valid = inventory + setOf("na", "nan")
+        val writes = mutableListOf<String>()
+        val editor = object : RecordingEditor(initial = "word ") {
+            override fun beginBatchEdit(): Boolean = true
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                writes += text.toString()
+                return super.setComposingText(text, newCursorPosition)
+            }
+        }
+        val (service, _) = keyboard(BuiltInLayouts.PINYIN_13, DoublePinyinScheme.XIAOHE, editor = editor)
+        val state = service.uiState.value
+        seedState(service, state.copy(settings = state.settings.copy(cjk = state.settings.cjk.copy(pinyinGlideMode = 2))))
+        val keys = listOf("bn", "ui", "as", "jk", "op").flatMapIndexed { index, group ->
+            group.map { KeyCenter(it, index * GLIDE_KEY_WIDTH, 0f) }
+        }
+        fun preview(endpoint: Int, time: Long) {
+            val points = listOf(GesturePoint(0f, 0f, 100), GesturePoint(endpoint * GLIDE_KEY_WIDTH, 0f, time))
+            service.onGesture(points, keys, GLIDE_KEY_WIDTH, GlideVerdict.Pinyin(preview = true, strokeId = 100))
+        }
+
+        preview(1, 200)
+        assertEquals("word ni", editor.text.toString())
+        service.onUpdateSelection(5, 5, 7, 7, 5, 7)
+        preview(4, 250)
+        assertEquals("word ni", editor.text.toString())
+        assertEquals("ni", service.uiState.value.pinyinGlidePreview?.reading)
+        assertTrue(service.uiState.value.pinyinGlidePreview!!.words.contains("\u4f60"))
+        assertTrue(service.uiState.value.pinyinGlidePreview!!.choices.isEmpty())
+        preview(2, 300)
+        assertEquals("word na", editor.text.toString())
+        preview(3, 350)
+        assertEquals("word nan", editor.text.toString())
+        service.onUpdateSelection(7, 7, 7, 7, 5, 7)
+        preview(2, 400)
+        assertEquals("word na", editor.text.toString())
+        val picked = service.uiState.value.pinyinGlidePreview!!.choices.first()
+        service.onGesture(emptyList(), keys, GLIDE_KEY_WIDTH, GlideVerdict.Pinyin(picked = picked, strokeId = 100))
+        assertEquals(listOf("ni", "a", "n", ""), writes)
+        assertEquals("word na", editor.text.toString())
+        assertTrue(editor.commits.isEmpty())
+    }
+
+    @Test fun `typing and ranking the same pinyin keep the already displayed prefix`() {
+        PinyinSyllables.valid = inventory + setOf("na", "bi")
+        CjkDictionaries.pinyin = ConversionDictionary.parse(sequenceOf(
+            "ni\t\u4f60\t1000", "hao\t\u597d\t100", "nihao\t\u4f60\u597d\t2000",
+            "na\t\u90a3\t500", "bi\t\u6bd4\t100",
+        ))
+        val writes = mutableListOf<String>()
+        val editor = object : RecordingEditor(initial = "word ") {
+            override fun beginBatchEdit(): Boolean = true
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                writes += text.toString()
+                return super.setComposingText(text, newCursorPosition)
+            }
+        }
+        val (service, _) = keyboard(BuiltInLayouts.COMPACT_PINYIN, DoublePinyinScheme.XIAOHE, editor = editor)
+        fun type(letter: String) = service.onKey(com.wasimaster.wmkeyboard.core.layout.Key(label = letter))
+        type("n")
+        settle { "\u90a3" in service.uiState.value.suggestions }
+        service.onUpdateSelection(5, 5, 6, 6, 5, 6)
+        type("i")
+        settle { "\u4f60" in service.uiState.value.suggestions && "\u90a3" !in service.uiState.value.suggestions }
+        assertEquals("word ni", editor.text.toString())
+        type("h")
+        service.onUpdateSelection(6, 6, 7, 7, 5, 7)
+        type("c")
+        settle { "\u4f60\u597d" in service.uiState.value.suggestions }
+        assertEquals("word nihao", editor.text.toString())
+        assertEquals(listOf("n", "i", "h", "ao"), writes)
+    }
+
+    @Test fun `grouped taps only display the resolved spelling in full and raw modes`() {
+        val savedRaw = CjkConfig.doublePinyinRawLetters
+        try {
+            PinyinSyllables.valid = inventory + setOf("bi")
+            CjkDictionaries.pinyin = ConversionDictionary.parse(sequenceOf(
+                "ni\t\u4f60\t1000", "hao\t\u597d\t100", "nihao\t\u4f60\u597d\t2000", "bi\t\u6bd4\t100",
+            ))
+            for (raw in listOf(false, true)) {
+                CjkConfig.doublePinyinRawLetters = raw
+                val writes = mutableListOf<String>()
+                val field = object : RecordingEditor() {
+                    override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                        writes += text.toString()
+                        return super.setComposingText(text, newCursorPosition)
+                    }
+                }
+                val (service, _) = keyboard(BuiltInLayouts.COMPACT_PINYIN, DoublePinyinScheme.XIAOHE, editor = field)
+                val groups = service.uiState.value.layouts.letters.rows.flatten()
+                fun press(group: String) = service.onKey(groups.first { it.letters == group })
+                press("bn")
+                press("ui")
+                settle { service.uiState.value.composingPreview == "ni" }
+                assertEquals(listOf("ni"), writes)
+                press("gh")
+                press("cv")
+                val expected = if (raw) "nihc" else "nihao"
+                settle { service.uiState.value.composingPreview == expected }
+                assertEquals(listOf("ni", expected), writes)
+                assertEquals(expected, field.text.toString())
+            }
+        } finally {
+            CjkConfig.doublePinyinRawLetters = savedRaw
+        }
+    }
+
+    @Test fun `a lone initial or vowel suggests Chinese before and after a complete syllable`() {
+        val savedJianpin = CjkConfig.jianpin
+        val savedIndex = Jianpin.index
+        PinyinSyllables.valid = inventory + setOf("lai", "liu", "a", "an", "o", "ou", "e", "er")
+        Jianpin.index = Jianpin.build(PinyinSyllables.valid)
+        CjkDictionaries.pinyin = ConversionDictionary.parse(sequenceOf(
+            "ni\t\u4f60\t100", "lai\t\u6765\t1000",
+            "nilai\t\u4f60\u6765\t2000", "liu\t\u516d\t100",
+            "a\t\u554a\t100", "an\t\u5b89\t1000", "nian\t\u4f60\u5b89\t2000",
+            "o\t\u54e6\t100", "ou\t\u6b27\t1000", "niou\t\u4f60\u6b27\t2000",
+            "e\t\u989d\t100", "er\t\u513f\t1000", "nier\t\u4f60\u513f\t2000",
+        ))
+        val qwerty = BuiltInLayouts.QWERTY.copy(
+            langId = "zh", composer = com.wasimaster.wmkeyboard.core.script.ComposerType.PINYIN,
+        )
+        try {
+            for (jianpin in listOf(false, true)) {
+                CjkConfig.jianpin = jianpin
+                for (scheme in listOf(DoublePinyinScheme.OFF, DoublePinyinScheme.XIAOHE)) {
+                    for (spec in listOf(qwerty, BuiltInLayouts.PINYIN_13, BuiltInLayouts.COMPACT_PINYIN)) {
+                        val (service, editor) = keyboard(spec, scheme)
+                        fun type(text: String) {
+                            val keys = spec.compile(LayoutLayer.LETTERS).rows.flatten()
+                            for (letter in text) service.onKey(keys.first { letter in it.letterSet() })
+                        }
+                        var committed = ""
+                        fun check(keys: String, expected: String) {
+                            type(keys)
+                            settle { expected in service.uiState.value.suggestions }
+                            val words = service.uiState.value.suggestions
+                            val index = words.indexOf(expected)
+                            assertTrue("${spec.id} / $scheme / $jianpin / $keys: $words", index >= 0)
+                            service.onCandidateTapped(expected, index)
+                            committed += expected
+                            assertEquals(committed, editor.text.toString())
+                        }
+                        for ((key, word) in mapOf("l" to "\u6765", "a" to "\u5b89", "o" to "\u6b27", "e" to "\u513f")) {
+                            check(key, word)
+                            check("ni$key", "\u4f60$word")
+                        }
+                    }
+                }
+            }
+        } finally {
+            CjkConfig.jianpin = savedJianpin
+            Jianpin.index = savedIndex
+        }
+    }
+
+    @Test fun `backspace inside displayed double pinyin removes the syllable and keeps the insertion point`() {
+        val spec = BuiltInLayouts.QWERTY.copy(
+            langId = "zh", composer = com.wasimaster.wmkeyboard.core.script.ComposerType.PINYIN,
+        )
+        val (service, editor) = keyboard(spec, DoublePinyinScheme.XIAOHE)
+        CjkConfig.doublePinyinSyllableDelete = true
+        fun type(keys: String) = keys.forEach { service.onKey(com.wasimaster.wmkeyboard.core.layout.Key(label = it.toString())) }
+        type("nihcni")
+        assertEquals("nihaoni", editor.text.toString())
+        service.onUpdateSelection(7, 7, 4, 4, 0, 7)
+        service.onKey(com.wasimaster.wmkeyboard.core.layout.Key(label = "", action = KeyAction.Delete))
+        assertEquals("nini", editor.text.toString())
+        type("hc")
+        assertEquals("nihaoni", editor.text.toString())
+    }
+
+    @Test fun `full pinyin previews the stroke before lift and clears it on cancellation`() {
+        val spec = BuiltInLayouts.QWERTY.copy(
+            langId = "zh", composer = com.wasimaster.wmkeyboard.core.script.ComposerType.PINYIN,
+        )
+        val (service, editor) = keyboard(spec, DoublePinyinScheme.OFF)
+        val keys = listOf(
+            com.wasimaster.wmkeyboard.core.gesture.KeyCenter('n', 0f, 0f),
+            com.wasimaster.wmkeyboard.core.gesture.KeyCenter('i', GLIDE_KEY_WIDTH, 0f),
+        )
+        val points = listOf(GesturePoint(0f, 0f, 100), GesturePoint(GLIDE_KEY_WIDTH, 0f, 200))
+        service.onGesturePreview(points.take(1), keys, GLIDE_KEY_WIDTH)
+        assertEquals("", editor.text.toString())
+        service.onGesturePreview(points, keys, GLIDE_KEY_WIDTH)
+        assertEquals("ni", service.uiState.value.pinyinGlidePreview?.reading)
+        assertEquals("ni", editor.text.toString())
+        service.onGesture(points, keys, GLIDE_KEY_WIDTH, com.wasimaster.wmkeyboard.ime.ui.GlideVerdict.Cancel)
+        assertEquals("", editor.text.toString())
+        assertTrue(editor.commits.isEmpty())
+    }
+
+    @Test fun `double pinyin shows the ranked compact reading and keeps it on lift`() {
+        val writes = mutableListOf<String>()
+        val editor = object : RecordingEditor() {
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                writes += text.toString()
+                return super.setComposingText(text, newCursorPosition)
+            }
+        }
+        val (service, _) = keyboard(BuiltInLayouts.COMPACT_PINYIN, DoublePinyinScheme.XIAOHE, editor = editor)
+        val keys = listOf(
+            com.wasimaster.wmkeyboard.core.gesture.KeyCenter('b', 0f, 0f),
+            com.wasimaster.wmkeyboard.core.gesture.KeyCenter('n', 0f, 0f),
+            com.wasimaster.wmkeyboard.core.gesture.KeyCenter('u', GLIDE_KEY_WIDTH, 0f),
+            com.wasimaster.wmkeyboard.core.gesture.KeyCenter('i', GLIDE_KEY_WIDTH, 0f),
+            com.wasimaster.wmkeyboard.core.gesture.KeyCenter('h', 2 * GLIDE_KEY_WIDTH, 0f),
+        )
+        val points = listOf(GesturePoint(0f, 0f, 100), GesturePoint(GLIDE_KEY_WIDTH, 0f, 200))
+        val lastVibration = WMKeyboardService::class.java.getDeclaredField("lastVibrateAt").apply { isAccessible = true }
+        val beforePreview = lastVibration.getLong(service)
+        service.onGesture(points, keys, GLIDE_KEY_WIDTH,
+            com.wasimaster.wmkeyboard.ime.ui.GlideVerdict.Pinyin(preview = true, strokeId = 100))
+        assertEquals(beforePreview, lastVibration.getLong(service))
+        assertEquals("ni", service.uiState.value.pinyinGlidePreview?.reading)
+        assertTrue(service.uiState.value.pinyinGlidePreview?.words.orEmpty().contains("\u4f60"))
+        assertEquals("ni", editor.text.toString())
+        service.onGesture(points + GesturePoint(2 * GLIDE_KEY_WIDTH, 0f, 210), keys, GLIDE_KEY_WIDTH,
+            com.wasimaster.wmkeyboard.ime.ui.GlideVerdict.Pinyin(strokeId = 100))
+        assertEquals("ni", editor.text.toString())
+        assertTrue(service.uiState.value.pinyinGlidePreview!!.settling)
+        assertTrue("\u4f60" in service.uiState.value.pinyinGlidePreview!!.words)
+        settle { service.uiState.value.pinyinGlidePreview == null && "\u4f60" in service.uiState.value.suggestions }
+        assertEquals(null, service.uiState.value.pinyinGlidePreview)
+        assertEquals(listOf("ni"), writes)
+    }
+
+    @Test fun `candidate page advances one syllable at a time even when its spelling is unchanged`() {
+        PinyinSyllables.valid = inventory + setOf("mi", "cang")
+        CjkDictionaries.pinyin = ConversionDictionary.parse(sequenceOf(
+            "ni\t你\t100", "mi\t米\t100", "hao\t好\t100", "nihao\t你好\t1000", "mihao\t米好\t1000",
+            "micang\t米仓\t1000",
+        ))
+        val spec = BuiltInLayouts.QWERTY.copy(
+            langId = "zh", composer = com.wasimaster.wmkeyboard.core.script.ComposerType.PINYIN,
+        )
+        var regionWrites = 0
+        val editor = object : RecordingEditor() {
+            override fun beginBatchEdit(): Boolean = true
+            override fun endBatchEdit(): Boolean = true
+
+            override fun setComposingRegion(start: Int, end: Int): Boolean {
+                regionWrites++
+                return super.setComposingRegion(start, end)
+            }
+        }
+        val (service, _) = keyboard(spec, DoublePinyinScheme.XIAOHE, editor = editor)
+        "nihc".forEach { service.onKey(com.wasimaster.wmkeyboard.core.layout.Key(label = it.toString())) }
+        settle { service.uiState.value.suggestions.firstOrNull() == "你好" }
+        service.onUpdateSelection(0, 0, 5, 5, 0, 5)
+        service.onCandidatesExpand()
+        fun pick(expectedSlot: Int, reading: String) {
+            settle { service.uiState.value.pinyinReadingCorrections.values.any { it.slot == expectedSlot } }
+            val choices = service.uiState.value.pinyinReadingCorrections
+            assertEquals(setOf(expectedSlot), choices.values.map { it.slot }.toSet())
+            val action = choices.entries.single { it.value.reading == reading }.key
+            service.onKey(com.wasimaster.wmkeyboard.core.layout.Key(reading, output = action, action = KeyAction.ReadingColumn))
+        }
+        val writesBeforePicking = regionWrites
+        pick(0, "mi")
+        service.onCandidateTapped("hao", 0)
+        assertTrue(editor.commits.isEmpty())
+        pick(1, "hao")
+        settle { service.uiState.value.pinyinCorrectionBuffer.isNotEmpty() && service.uiState.value.pinyinReadingCorrections.isEmpty() }
+        assertTrue(service.uiState.value.pinyinReadingCorrections.isEmpty())
+        assertEquals("mihao", editor.text.toString())
+        assertEquals("米好", service.uiState.value.expandedCandidates.first())
+
+        service.onCandidatesExpand()
+        service.onCandidatesExpand()
+        settle { service.uiState.value.pinyinCorrectionBuffer.isNotEmpty() }
+        fun undo(expectedSlot: Int) {
+            assertTrue(UndoReadingSelection in service.uiState.value.conversionReadings)
+            service.onKey(com.wasimaster.wmkeyboard.core.layout.Key("", output = UndoReadingSelection, action = KeyAction.ReadingColumn))
+            settle { service.uiState.value.pinyinReadingCorrections.values.any { it.slot == expectedSlot } }
+            assertEquals(setOf(expectedSlot), service.uiState.value.pinyinReadingCorrections.values.map { it.slot }.toSet())
+        }
+        undo(1)
+        assertEquals("mihao", editor.text.toString())
+        service.onUpdateSelection(5, 5, 5, 5, 0, 5)
+        pick(1, "cang")
+        settle { service.uiState.value.expandedCandidates.firstOrNull() == "米仓" }
+        assertEquals("micang", editor.text.toString())
+        undo(1)
+        assertEquals("mihao", editor.text.toString())
+        undo(0)
+        assertEquals("nihao", editor.text.toString())
+        assertTrue(UndoReadingSelection !in service.uiState.value.conversionReadings)
+        assertEquals(writesBeforePicking, regionWrites)
+        assertTrue(editor.commits.isEmpty())
+    }
+
+    @Test fun `double Pinyin offers a frequent two-syllable repair early and commits it once`() {
+        PinyinSyllables.valid = setOf("li", "ni", "cang", "hao")
+        CjkDictionaries.pinyin = ConversionDictionary.parse(sequenceOf(
+            "li\t李\t100", "cang\t仓\t100", "licang\t李沧\t300", "nihao\t你好\t9000",
+        ))
+        val spec = BuiltInLayouts.QWERTY.copy(langId = "zh", composer = com.wasimaster.wmkeyboard.core.script.ComposerType.PINYIN)
+        val (service, editor) = keyboard(spec, DoublePinyinScheme.XIAOHE)
+        "lich".forEach { service.onKey(com.wasimaster.wmkeyboard.core.layout.Key(label = it.toString())) }
+        settle { "你好" in service.uiState.value.suggestions }
+        val candidates = service.uiState.value.suggestions
+        val index = candidates.indexOf("你好")
+        assertTrue(candidates.toString(), index in 1..2)
+        assertEquals("李沧", candidates.first())
+        assertTrue(editor.commits.isEmpty())
+        service.onCandidateTapped("你好", index)
+        assertEquals(listOf("你好"), editor.commits)
+        assertEquals("你好", editor.text.toString())
+    }
+
+    @Test fun `compact lift uses the last turn and correction can recover gai from df`() {
+        PinyinSyllables.valid = setOf("da", "dai", "gai", "hai", "ha")
+        CjkDictionaries.pinyin = ConversionDictionary.parse(sequenceOf(
+            "da\t大\t850", "dai\t带\t900", "gai\t概\t800", "dagai\t大概\t640",
+        ))
+        for (spec in listOf(BuiltInLayouts.PINYIN_13, BuiltInLayouts.COMPACT_PINYIN)) {
+            val (service, editor) = keyboard(spec, DoublePinyinScheme.XIAOHE)
+            val keys = listOf("as", "df", "gh").flatMapIndexed { index, group ->
+                group.map { com.wasimaster.wmkeyboard.core.gesture.KeyCenter(it, index * 2 * GLIDE_KEY_WIDTH, 0f) }
+            }
+            val points = listOf(2f, 0f, 4f, 2f).mapIndexed { index, x ->
+                GesturePoint(x * GLIDE_KEY_WIDTH, 0f, 100L + index * 30L)
+            }
+            service.onGesture(points.take(2), keys, GLIDE_KEY_WIDTH,
+                com.wasimaster.wmkeyboard.ime.ui.GlideVerdict.Pinyin(preview = true, strokeId = 100))
+            assertEquals("da", editor.text.toString())
+            service.onGesture(points, keys, GLIDE_KEY_WIDTH,
+                com.wasimaster.wmkeyboard.ime.ui.GlideVerdict.Pinyin(strokeId = 100))
+            assertEquals("dagai", editor.text.toString())
+            settle { "大概" in service.uiState.value.suggestions }
+            assertTrue("大概" in service.uiState.value.suggestions)
+
+            val (correction, _) = keyboard(spec, DoublePinyinScheme.XIAOHE)
+            val df = correction.uiState.value.layouts.letters.rows.flatten().first { it.letters == "df" }
+            repeat(2) { correction.onKey(df) }
+            correction.onCandidatesExpand()
+            settle { correction.uiState.value.pinyinReadingCorrections.isNotEmpty() }
+            val choices = correction.uiState.value.pinyinReadingCorrections.values.map { it.reading }
+            assertTrue("${spec.id}: $choices", "gai" in choices)
         }
     }
 

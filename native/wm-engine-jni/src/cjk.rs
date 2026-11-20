@@ -366,8 +366,7 @@ entry!(Java_com_wasimaster_wmkeyboard_core_input_composer_CjkNative_ngramBigram(
 entry!(Java_com_wasimaster_wmkeyboard_core_input_composer_CjkNative_ngramSuccessors(handle: jlong, word: JString<'l>, limit: jint, counts: JIntArray<'l>) -> jstring, null_mut(), |env| {
     let ngrams = object!(env, NGRAMS, handle);
     let word = read(env, &word)?;
-    let mut found = ngrams.successors(&word);
-    found.truncate(limit.max(0) as usize);
+    let found = ngrams.successors_limited(&word, limit.max(0) as usize);
     give_counted(env, found, &counts)
 });
 

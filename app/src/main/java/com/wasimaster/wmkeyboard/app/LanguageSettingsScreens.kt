@@ -2248,6 +2248,14 @@ private fun CjkDictPackManager(
                     default = SettingsDefaults.cjk.pinyinEnterDoubleTap,
                 ) { on -> scope.launch { repository.setPinyinEnterDoubleTap(on) } }
             }
+            item(level = SettingLevel.STANDARD) {
+                ToggleSetting(
+                    R.string.languages_pinyin_caret_title,
+                    stringResource(R.string.languages_pinyin_caret_subtitle),
+                    settings.watch { it.cjk.pinyinCaretInReading },
+                    default = SettingsDefaults.cjk.pinyinCaretInReading,
+                ) { on -> scope.launch { repository.setPinyinCaretInReading(on) } }
+            }
             // Jianpin (简拼): the first letter of each syllable is enough, so
             // `wm` finds 我们. Every shipping Chinese IME does this by default
             // (#405). Under a Double Pinyin scheme a syllable is always two

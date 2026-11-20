@@ -98,7 +98,6 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridItemScope
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items as lazyRowItems
@@ -1977,7 +1976,7 @@ internal val LocalLiveUiState = staticCompositionLocalOf<State<KeyboardUiState>?
  * clear.
  */
 internal fun KeyboardUiState.withoutTypingFields(): KeyboardUiState =
-    if (pinyinGlidePreview==null && suggestions.isEmpty() && emojiSuggestions.isEmpty() && composingPreview.isEmpty() &&
+    if (pinyinGlidePreview==null && stripReadingCaret < 0 && suggestions.isEmpty() && emojiSuggestions.isEmpty() && composingPreview.isEmpty() &&
         nextLetterBias.isEmpty() && autocorrectWord == null && newWords.isEmpty() &&
         stripTyped == null && sentenceOpeners.isEmpty() && punctuationSuggestions.isEmpty() &&
         phoneticCandidates.isEmpty() && octopus.isEmpty() && octopusGlide.isEmpty()
@@ -1989,6 +1988,7 @@ internal fun KeyboardUiState.withoutTypingFields(): KeyboardUiState =
             suggestions = emptyList(),
             emojiSuggestions = emptyList(),
             composingPreview = "",
+            stripReadingCaret = -1,
             nextLetterBias = emptyMap(),
             autocorrectWord = null,
             newWords = emptySet(),
@@ -2007,6 +2007,7 @@ private fun KeyboardUiState.withTypingFrom(live: KeyboardUiState): KeyboardUiSta
         suggestions = live.suggestions,
         emojiSuggestions = live.emojiSuggestions,
         composingPreview = live.composingPreview,
+        stripReadingCaret = live.stripReadingCaret,
         nextLetterBias = live.nextLetterBias,
         autocorrectWord = live.autocorrectWord,
         newWords = live.newWords,
@@ -2031,7 +2032,7 @@ internal fun withLiveTyping(state: KeyboardUiState): KeyboardUiState {
     if (LocalKeyboardPreviewHost.current) return state
     val now = live.value
     return remember(
-        state, now.suggestions, now.emojiSuggestions, now.composingPreview,
+        state, now.suggestions, now.emojiSuggestions, now.composingPreview, now.stripReadingCaret,
         now.nextLetterBias, now.autocorrectWord, now.newWords,
         now.stripTyped, now.sentenceOpeners, now.punctuationSuggestions, now.phoneticCandidates,
         now.octopus, now.octopusGlide,
@@ -2039,6 +2040,7 @@ internal fun withLiveTyping(state: KeyboardUiState): KeyboardUiState {
         val same = state.suggestions === now.suggestions &&
             state.emojiSuggestions === now.emojiSuggestions &&
             state.composingPreview == now.composingPreview &&
+            state.stripReadingCaret == now.stripReadingCaret &&
             state.nextLetterBias === now.nextLetterBias &&
             state.autocorrectWord == now.autocorrectWord &&
             state.newWords === now.newWords &&
@@ -4059,6 +4061,11 @@ private fun TopBar(
 ) {
     // The strip is what typing changes: this is where the live fields come in.
     val state = withLiveTyping(barState)
+    val pinyinPreview = if (LocalKeyboardPreviewHost.current) null else
+        LocalLiveUiState.current?.value?.pinyinGlidePreview?.takeIf {
+            it.choices.isNotEmpty() || it.words.isNotEmpty() || it.settling
+        }
+
     // "Show the toolbar instead" while suggestions are up; resets once the
     // suggestions go away so the bar returns to candidates next time.
     var toolbarOverride by remember { mutableStateOf(false) }
@@ -4098,7 +4105,7 @@ private fun TopBar(
         state.fieldKind != FieldKind.EMAIL &&
         state.composingPreview.isEmpty() &&
         (state.suggestions.isNotEmpty() || state.emojiSuggestions.isNotEmpty())
-    val hasSuggestions =
+    val hasSuggestions = pinyinPreview != null ||
         (!openersAtRest && (state.suggestions.isNotEmpty() || state.emojiSuggestions.isNotEmpty())) ||
         state.smart != null || recentClipChip || recentClipsBar ||
         // The backspace undo chip: a field just emptied is exactly where it
@@ -4141,6 +4148,7 @@ private fun TopBar(
         // Its SOS easter-egg note counts the same way, or the toolbar would
         // cover the joke in the exact pause it appears in.
         state.morsePending.isNotEmpty() || state.braillePending.isNotEmpty() || state.morseSosEgg ||
+        state.hasPinyinCandidatePanel() ||
         // Inline chips count too, in both lanes. Neither arrives while the user
         // is typing — a login field has no word candidates and a smart reply
         // comes before you have written anything — so without this the toolbar
@@ -4283,7 +4291,8 @@ private fun TopBar(
     // fades the old candidates out over [StripContentFadeOutMs] instead of
     // blanking them the instant state empties. They refresh whenever real
     // candidates arrive and are held (behind alpha 0) once they leave.
-    val suggestionsShowing = state.suggestions.isNotEmpty() || state.emojiSuggestions.isNotEmpty()
+    val suggestionsShowing = pinyinPreview != null || state.suggestions.isNotEmpty() ||
+        state.emojiSuggestions.isNotEmpty() || state.hasPinyinCandidatePanel()
     // Candidates are on screen only while the strip itself holds the row — not
     // when the toolbar or a panel does. The fade keys on this, not on the
     // candidates alone: candidates can already exist, hidden behind the
@@ -4304,7 +4313,7 @@ private fun TopBar(
     // stale. The non-empty gate is unchanged: it is what holds the last
     // candidates on screen for the fade-out instead of blanking them.
     val held = remember { HeldCandidates(state) }
-    if (state.suggestions.isNotEmpty() || state.emojiSuggestions.isNotEmpty()) {
+    if (suggestionsShowing) {
         held.advance(state)
     }
     // Issue #84: while a stroke is still down, the strip can be held to the one
@@ -4316,16 +4325,16 @@ private fun TopBar(
     // stands down with them, since those are all left over from the word before
     // the stroke and "only the current word" is what the setting promises.
     val glideStripOnly = state.settings.gesture.stripPreviewOnly && state.glideWord != null
-    val shownSuggestions = held.suggestions
-    val shownEmojiSuggestions = if (glideStripOnly) emptyList() else held.emojiSuggestions
+    val shownSuggestions = pinyinPreview?.words ?: held.suggestions
+    val shownEmojiSuggestions = if (glideStripOnly || pinyinPreview != null) emptyList() else held.emojiSuggestions
     // Held alongside the candidates: the fade-out must keep drawing the row it
     // faded in, or a cleared ":tada" buffer would flip the emoji back to text
     // chips for the length of the fade.
-    val shownInlineEmoji = held.inlineEmoji
+    val shownInlineEmoji = pinyinPreview == null && held.inlineEmoji
     // Punctuation chips are held alongside the words so they fade out with them
     // rather than blanking. The service only fills them when word candidates
     // are present, so they follow the same non-empty gate.
-    val shownPunctuation = if (glideStripOnly) emptyList() else held.punctuation
+    val shownPunctuation = if (glideStripOnly || pinyinPreview != null) emptyList() else held.punctuation
     // Fade in when the strip shows its candidates, out when it stops. Keyed on
     // strip visibility (see [stripContentVisible]), so it fires both when
     // candidates land while the strip is up and when the strip retakes the row
@@ -4857,6 +4866,7 @@ private fun TopBar(
                         StripWords(
                             state = state,
                             held = held,
+                            pinyinPreview = pinyinPreview,
                             suggestionsShowing = suggestionsShowing,
                             shownSuggestions = shownSuggestions,
                             shownEmojiSuggestions = shownEmojiSuggestions,
@@ -5815,6 +5825,7 @@ private fun RowScope.StripAnswerChips(
 private fun RowScope.StripWords(
     state: KeyboardUiState,
     held: HeldCandidates,
+    pinyinPreview: PinyinGlidePreview?,
     suggestionsShowing: Boolean,
     shownSuggestions: List<String>,
     shownEmojiSuggestions: List<String>,
@@ -5865,7 +5876,12 @@ private fun RowScope.StripWords(
     // The Chinese reading, when it is kept out of the field (#973). It decides
     // the branch too: a reading with no candidates yet keeps the strip's
     // previous list, and with it a stale [HeldCandidates.conversion].
-    val readingOnStrip = if (state.readingInKeyboard()) state.composingPreview else ""
+    val readingOnStrip = if (state.readingInKeyboard()) {
+        val reading = pinyinPreview?.reading ?: state.composingPreview
+        val caret = state.stripReadingCaret
+        if ((pinyinPreview == null || pinyinPreview.settling) && caret in reading.indices)
+            reading.replaceRange(caret, caret, "│") else reading
+    } else ""
     if (shownInlineEmoji) {
         // A ":tada" buffer: emoji, in the emoji font, as many as fit
         // the scroll rather than the three slots words get.
@@ -5875,14 +5891,14 @@ private fun RowScope.StripWords(
             alpha = stripContentFade,
             onEmoji = onSuggestion,
         )
-    } else if (held.conversion || readingOnStrip.isNotEmpty()) {
+    } else if (pinyinPreview != null || held.conversion || readingOnStrip.isNotEmpty() || state.hasPinyinCandidatePanel()) {
         CandidateStrip(
             candidates = shownSuggestions,
-            enabled = suggestionsShowing,
+            enabled = suggestionsShowing && pinyinPreview == null,
             alpha = stripContentFade,
             textScale = state.settings.suggestionStrip.textScale,
-            hints = if (suggestionsShowing) suggestionHintPlan(state) else null,
-            highlighted = state.candidateCursor,
+            hints = if (suggestionsShowing && pinyinPreview == null) suggestionHintPlan(state) else null,
+            highlighted = if (pinyinPreview == null) state.candidateCursor else -1,
             adjustable = state.composer.adjustsChoices,
             reading = readingOnStrip,
             onCandidate = onCandidate,
@@ -7155,6 +7171,9 @@ internal fun fitSuggestionText(
  *
  * No shift re-casing either: Han characters and kana have no case.
  */
+private fun KeyboardUiState.hasPinyinCandidatePanel(): Boolean =
+    composer.glidesPinyinReadings && composingPreview.isNotEmpty()
+
 @Composable
 private fun RowScope.CandidateStrip(
     candidates: List<String>,
@@ -7178,6 +7197,7 @@ private fun RowScope.CandidateStrip(
     onAdjust: (String, Int, CandidateAdjustment) -> Unit = { _, _, _ -> },
 ) {
     val listState = rememberLazyListState()
+    val menuFeedback = LocalKeyPressFeedback.current
     // The held candidate whose menu fills the strip, by position; -1 for none.
     var menuFor by remember { mutableIntStateOf(-1) }
     // A new reading starts at the left edge, where its best candidates are.
@@ -7218,14 +7238,15 @@ private fun RowScope.CandidateStrip(
     BoxWithConstraints(
         modifier = Modifier.weight(1f).fillMaxHeight(),
     ) {
-        // LazyRow measures its items with unbounded width. Bound each chip to
-        // the actual viewport so a sentence cannot push every alternative out
-        // of view. Short words keep their natural width.
-        val chipMaxWidth = (maxWidth * 0.6f).coerceAtLeast(CandidateChipMinWidth)
-        val measurer = rememberTextMeasurer()
+        // Use the full viewport when the reading and emoji leave a narrow strip.
+        val chipMinWidth = CandidateChipMinWidth.coerceAtMost(maxWidth)
+        val singleChipWidth = (CandidateChipMinWidth * 2).coerceAtMost(maxWidth)
+        val chipMaxWidth = (maxWidth * 0.6f).coerceAtLeast(singleChipWidth)
+        val textPadding = (chipMaxWidth / 5).coerceAtMost(10.dp)
+        val measurer = LocalStripTextMeasurer.current ?: rememberTextMeasurer()
         val density = LocalDensity.current
         val baseStyle = LocalTextStyle.current
-        val textWidthPx = with(density) { (chipMaxWidth - 20.dp).toPx() }.coerceAtLeast(1f)
+        val textWidthPx = with(density) { (chipMaxWidth - textPadding * 2).toPx() }
         LazyRow(
             state = listState,
             modifier = Modifier
@@ -7243,7 +7264,7 @@ private fun RowScope.CandidateStrip(
                 }
                 Box(
                     modifier = Modifier
-                        .widthIn(min = CandidateChipMinWidth, max = chipMaxWidth)
+                        .widthIn(min = chipMinWidth, max = chipMaxWidth)
                         .fillMaxHeight()
                         .padding(vertical = if (index == highlighted) 2.dp else 0.dp)
                         .focusRing(index == highlighted, RoundedCornerShape(10.dp))
@@ -7251,8 +7272,12 @@ private fun RowScope.CandidateStrip(
                         // the buffer to eat from where the chip sat.
                         .combinedClickable(
                             enabled = enabled,
+                            hapticFeedbackEnabled = false,
                             onLongClick = if (adjustable) {
-                                { menuFor = index }
+                                {
+                                    menuFeedback()
+                                    menuFor = index
+                                }
                             } else {
                                 null
                             },
@@ -7261,37 +7286,31 @@ private fun RowScope.CandidateStrip(
                 ) {
                     val weight = if (index == highlighted.coerceAtLeast(0)) FontWeight.SemiBold else FontWeight.Normal
                     val style = baseStyle.merge(TextStyle(
-                        color = MaterialTheme.colorScheme.onSurface,
                         fontSize = CandidateFontSize * textScale,
                         fontWeight = weight,
                         textAlign = TextAlign.Center,
                         lineHeight = 1.05.em,
                     ))
-                    val scaleX = remember(suggestion, style, textWidthPx) {
-                        // Measure at the requested font size. Only squeeze the
-                        // glyphs horizontally; font size and line height stay fixed.
-                        val measured = measurer.measure(
-                            text = suggestion,
-                            style = style,
-                            maxLines = 2,
-                            constraints = Constraints(maxWidth = textWidthPx.toInt().coerceAtLeast(1)),
-                        )
-                        if (!measured.hasVisualOverflow) 1f else {
-                            val naturalWidth = measurer.measure(
-                                text = suggestion, style = style, softWrap = false, maxLines = 1,
-                            ).size.width.coerceAtLeast(1)
-                            // Leave a little room for whole glyphs at the line break.
-                            (textWidthPx * 2f * 0.95f / naturalWidth).coerceIn(0.7f, 1f)
-                        }
+                    val label = remember(suggestion) { AnnotatedString(suggestion) }
+                    val scaleX = remember(label, style, textWidthPx) {
+                        val naturalWidth = measurer.measure(
+                            text = label, style = style, softWrap = false, maxLines = 1,
+                        ).size.width.coerceAtLeast(1)
+                        (textWidthPx / naturalWidth).coerceIn(0.6f, 1f)
                     }
-                    BasicText(
-                        text = suggestion,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
-                        style = style.merge(TextStyle(
-                            textGeometricTransform = TextGeometricTransform(scaleX = scaleX),
-                        )),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
+                    val fittedStyle = if (scaleX < 1f) {
+                        style.copy(textGeometricTransform = TextGeometricTransform(
+                            scaleX = (style.textGeometricTransform?.scaleX ?: 1f) * scaleX,
+                            skewX = style.textGeometricTransform?.skewX ?: 0f,
+                        ))
+                    } else style
+                    CachedTextLine(
+                        text = label,
+                        modifier = Modifier.padding(horizontal = textPadding, vertical = 2.dp),
+                        style = fittedStyle,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        overflow = TextOverflow.MiddleEllipsis,
+                        cache = measurer,
                     )
                     CandidatePopupMenu(
                         candidate = suggestion,
@@ -7340,43 +7359,48 @@ private fun CandidateGridPanel(
     onKey: (Key) -> Unit,
 ) {
     val readingFeedback=LocalKeyRoleFeedback.current
-    val rawReadings=LocalConversionReadings.current.value
-    val canUndo=com.wasimaster.wmkeyboard.ime.UndoReadingSelection in rawReadings
-    val readings=rawReadings.filterNot { it==com.wasimaster.wmkeyboard.ime.UndoReadingSelection }
-    val hints=LocalLiveUiState.current?.value?.conversionReadingHints ?: state.conversionReadingHints
-    val landscape=LocalConfiguration.current.orientation==Configuration.ORIENTATION_LANDSCAPE
-    val right=readingColumnOnRight(state.settings,landscape)
-    var showAllCorrections by remember(readings) { mutableStateOf(false) }
-    val visibleReadings=visibleReadingChoices(readings,hints,showAllCorrections)
-    val textDirection=LocalLayoutDirection.current
-    val undoDescription=stringResource(R.string.ime_glide_undo_syllable)
-    val editDescription=stringResource(R.string.ime_glide_reading_edit)
-    val hasColumn=readings.isNotEmpty() || canUndo
+    val rawReadings = LocalConversionReadings.current.value
+    val canUndo = com.wasimaster.wmkeyboard.ime.UndoReadingSelection in rawReadings
+    val live = LocalLiveUiState.current?.value ?: state
+    val corrections = live.pinyinReadingCorrections
+    val waitingForPinyin = live.composer.glidesPinyinReadings && live.pinyinCorrectionBuffer.isEmpty()
+    val readings = if (corrections.isNotEmpty()) corrections.keys.toList()
+        else if (waitingForPinyin) emptyList()
+        else rawReadings.filterNot { it == com.wasimaster.wmkeyboard.ime.UndoReadingSelection }
+    val hints = live.conversionReadingHints
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val right = readingColumnOnRight(state.settings, landscape)
+    val readingListState = rememberLazyListState()
+    fun readingKey(action: String): String = corrections[action]?.let { "${it.slot}:${it.reading}" } ?: action
+    LaunchedEffect(readings.firstOrNull()?.let(::readingKey)) { readingListState.requestScrollToItem(0) }
+    val textDirection = LocalLayoutDirection.current
+    val undoDescription = stringResource(R.string.ime_glide_undo_syllable)
+    val editDescription = stringResource(R.string.ime_glide_reading_edit)
+    // Keep space reserved through the asynchronous refresh when a syllable advances.
+    val hasColumn = (live.composer.glidesPinyinReadings && live.composingPreview.isNotEmpty()) ||
+        readings.isNotEmpty() || canUndo
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
         Row(Modifier.fillMaxWidth().height(keyRowsHeight(state))) {
             @Composable fun ReadingColumn() {
-                Column(Modifier.width(if(hints.isEmpty()) 80.dp else 112.dp).fillMaxHeight()) {
-                    LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
-                        itemsIndexed(visibleReadings) { index,reading ->
-                            Column(Modifier.fillMaxWidth().clickable {
-                                readingFeedback(KeySoundTarget.DEFAULT)
-                                onKey(Key(label=reading,output=reading,action=KeyAction.ReadingColumn))
-                            }.padding(horizontal=8.dp,vertical=12.dp)) {
-                                Text(reading,color=MaterialTheme.colorScheme.onSurface,fontSize=16.sp,
-                                    fontWeight=if(hints[reading]?.selected ?: (index==0)) FontWeight.SemiBold else FontWeight.Normal)
-                                hints[reading]?.let { hint ->
-                                    Box(Modifier.fillMaxWidth().height(3.dp).background(MaterialTheme.colorScheme.onSurface.copy(alpha=0.12f))) {
-                                        Box(Modifier.fillMaxWidth(hint.weight.coerceIn(0.01f,1f)).height(3.dp).background(MaterialTheme.colorScheme.primary))
-                                    }
-                                    Text(stringResource(R.string.ime_glide_reading_evidence,(hint.weight*100).roundToInt(),(hint.deviation*100).roundToInt()),
-                                        fontSize=10.sp,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                                    if(hint.neighbour) Text(stringResource(R.string.ime_glide_reading_neighbour),fontSize=10.sp,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                        }
-                        if(visibleReadings.size<readings.size) item(key="more-nearby-readings") {
-                            Text(stringResource(R.string.ime_glide_reading_more),fontSize=12.sp,color=MaterialTheme.colorScheme.primary,
-                                modifier=Modifier.fillMaxWidth().clickable { readingFeedback(KeySoundTarget.DEFAULT);showAllCorrections=true }.padding(8.dp))
+                Column(Modifier.width(80.dp).fillMaxHeight()) {
+                    LazyColumn(state = readingListState, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        itemsIndexed(readings, key = { _, reading -> readingKey(reading) }) { index, reading ->
+                            val correction = corrections[reading]
+                            val label = correction?.reading ?: reading
+                            Text(
+                                text = label,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 16.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = if (index == 0 || hints[reading]?.selected == true) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier.fillMaxWidth().clickable(
+                                    enabled = correction == null || live.pinyinCorrectionBuffer.isNotEmpty(),
+                                ) {
+                                    readingFeedback(KeySoundTarget.DEFAULT)
+                                    onKey(Key(label = label, output = reading, action = KeyAction.ReadingColumn))
+                                }.padding(horizontal = 8.dp, vertical = 12.dp),
+                            )
                         }
                     }
                     HorizontalDivider()
@@ -7401,7 +7425,9 @@ private fun CandidateGridPanel(
             }
             if(!right && hasColumn) { ReadingColumn();VerticalDivider() }
             Box(Modifier.weight(1f)) {
-                CompositionLocalProvider(LocalLayoutDirection provides textDirection) { CandidateGridBody(state,onCandidate,onAdjust) }
+                CompositionLocalProvider(LocalLayoutDirection provides textDirection) {
+                    CandidateGridBody(state, onCandidate, onAdjust)
+                }
             }
             if(right && hasColumn) { VerticalDivider();ReadingColumn() }
         }
@@ -7415,6 +7441,7 @@ private fun CandidateGridBody(
     onAdjust: (String, Int, CandidateAdjustment) -> Unit = { _, _, _ -> },
 ) {
     val textScale = state.settings.suggestionStrip.textScale
+    val menuFeedback = LocalKeyPressFeedback.current
     var menuFor by remember(state.expandedCandidates) { mutableIntStateOf(-1) }
     val adjustable = state.composer.isConversion && state.composer.adjustsChoices
     Column(
@@ -7461,8 +7488,12 @@ private fun CandidateGridBody(
                         else Modifier.height(CandidateGridRowHeight),
                     )
                     .combinedClickable(
+                        hapticFeedbackEnabled = false,
                         onLongClick = if (adjustable) {
-                            { menuFor = index }
+                            {
+                                menuFeedback()
+                                menuFor = index
+                            }
                         } else {
                             null
                         },
@@ -20681,6 +20712,7 @@ private fun KeyRows(
     // respects the user's feedback settings — not Compose's, whose name this
     // composition local deliberately shadows.
     val pickerHaptic = LocalHapticFeedback.current
+    val glideFeedback = rememberUpdatedState(LocalKeyPressFeedback.current)
     // Read inside the pointer loop, which outlives the composition that started
     // it — a captured value would be whatever the stroke began with. The
     // choices and the close-call flag change with every preview; the picker's
@@ -20689,13 +20721,21 @@ private fun KeyRows(
     val pinyinFallback=rememberUpdatedState(state.pinyinGlidePreview)
     val pinyinLive: State<PinyinGlidePreview?> = remember(liveUi) {
         object : State<PinyinGlidePreview?> {
-            override val value: PinyinGlidePreview? get()=if(liveUi!=null) liveUi.value.pinyinGlidePreview else pinyinFallback.value
+            override val value: PinyinGlidePreview?
+                get() = (if (liveUi != null) liveUi.value.pinyinGlidePreview else pinyinFallback.value)
+                    ?.takeUnless { it.settling }
         }
     }
     val pinyinOptions = rememberUpdatedState(state.settings.cjk)
-    val pinyinMode = rememberUpdatedState(if(state.composer.glidesPinyinReadings && state.captureTarget()==null &&
-        state.settings.cjk.pinyinDoublePinyin != com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinScheme.OFF)
-        state.settings.cjk.pinyinGlideMode else 0)
+    val predictsPinyinLive = rememberUpdatedState(
+        state.composer.glidesPinyinReadings && state.captureTarget() == null &&
+            !state.typingTestActive && !state.wordSpellActive,
+    )
+    val pinyinMode = rememberUpdatedState(
+        if (predictsPinyinLive.value && state.settings.cjk.pinyinDoublePinyin !=
+            com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinScheme.OFF
+        ) state.settings.cjk.pinyinGlideMode else 0,
+    )
     val undoPinyinCaption = rememberUpdatedState("↶")
     val retryPinyinCaption = rememberUpdatedState("↺")
     val glideCloseCall = rememberUpdatedState(state.glideCloseCall)
@@ -21595,6 +21635,7 @@ private fun KeyRows(
                         },
                         onGesture = onGesture,
                         onGesturePreview = onGesturePreview,
+                        onGlideEnd = { glideFeedback.value() },
                         swipeClaimed = { fingerGate.claimed },
                         alternatesOpen = { alternatesGate.open },
                         flickJudge = { at ->
@@ -21836,7 +21877,10 @@ private fun KeyRows(
                         val end = pinyinKey(seg.last()) ?: return false
                         if (start.x != end.x || start.y != end.y) return false
                         val cell = liveRects.value.letterCellAt(Offset(seg.first().x,seg.first().y)+boxOrigin)
-                        val width = (cell?.width ?: keyWidth.value) / keyWidth.value
+                            ?.translate(-boxOrigin) ?: return false
+                        val boundary = cell.inflate(keyWidth.value * 0.08f)
+                        if (seg.any { !boundary.contains(Offset(it.x, it.y)) }) return false
+                        val width = cell.width / keyWidth.value
                         return com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinGlide.hasLoop(
                             seg.map { com.wasimaster.wmkeyboard.core.input.composer.DoublePinyinGlide.Point(
                                 ((it.x-start.x)/keyWidth.value).toDouble(),
@@ -21901,12 +21945,7 @@ private fun KeyRows(
                         // The trail fades where it is; its head stops following
                         // the finger.
                         trail.release()
-                        // Fired here rather than routed through the service:
-                        // the picker is the composable's own event, and
-                        // threading a callback for it would mean another
-                        // KeyboardScreen parameter on a function already at
-                        // the method-size limit.
-                        if (hapticOn.value) pickerHaptic()
+                        if (picker.isOpen) glideFeedback.value()
                     }
                     fun acceptPinyinHover(explicit: String? = null): Boolean {
                         if(pinyinMode.value==0) return false
@@ -21938,7 +21977,7 @@ private fun KeyRows(
                         pinyinReturning=true
                         pinyinHoverSince=0L
                         keyList?.let { onGesture(emptyList(),it,keyWidth.value,GlideVerdict.Pinyin(pinyinSession.choices,preview=true,strokeId=down.uptimeMillis)) }
-                        if(hapticOn.value) pickerHaptic()
+                        glideFeedback.value()
                         return true
                     }
                     // The stroke is a glide from here on: the trail starts,
@@ -22052,7 +22091,7 @@ private fun KeyRows(
                                         resumePinyin(point)
                                     }
                                 } else if(picker.isOpen) acceptPinyinHover() else {
-                                    if(pinyinRequestedEnd!=seg.lastOrNull()?.t && (pinyinMode.value==1 || pinyinLive.value?.end!=seg.lastOrNull()?.t || pinyinLive.value?.start!=seg.firstOrNull()?.t)) {
+                                    if(pinyinRequestedEnd!=seg.lastOrNull()?.t && (pinyinLive.value?.end!=seg.lastOrNull()?.t || pinyinLive.value?.start!=seg.firstOrNull()?.t)) {
                                         pinyinRequestedEnd=seg.lastOrNull()?.t ?: Long.MIN_VALUE
                                         keyList?.let { onGesture(pinyinPoints(seg),it,keyWidth.value,GlideVerdict.Pinyin(pinyinSession.choices,preview=true,strokeId=down.uptimeMillis)) }
                                     }
@@ -22078,6 +22117,7 @@ private fun KeyRows(
                         if (fingerGate.claimed) {
                             picker.close()
                             trail.clear()
+                            if (isGesture) glideFeedback.value()
                             if (previewedSeg || (isGesture && pinyinMode.value != 0)) {
                                 keyList?.let { onGesture(seg, it, keyWidth.value, GlideVerdict.Cancel) }
                             }
@@ -22113,6 +22153,7 @@ private fun KeyRows(
                             if(isGesture && pinyinMode.value!=0) {
                                 // Own the release before any callback can change composing state or dismiss overlays.
                                 change.consume()
+                                glideFeedback.value()
                                 if(picker.isOpen) picker.track(change.position.x,change.position.y,cancelBelowPx)
                                 val selection=picker.picked()
                                 // A lift can carry the last movement even when no final
@@ -22330,7 +22371,7 @@ private fun KeyRows(
                             // Live preview of the word being drawn now, at a
                             // fixed wall-clock cadence.
                             val sincePreview = change.uptimeMillis - lastPreviewMs
-                            if (sincePreview >= (if(pinyinMode.value==1) 160L else if(pinyinMode.value==2) 8L else PREVIEW_INTERVAL_MS) && seg.size >= (if(pinyinMode.value==2) 2 else PREVIEW_MIN_POINTS)) {
+                            if (sincePreview >= (if(pinyinMode.value==1) 40L else if(pinyinMode.value==2) 8L else PREVIEW_INTERVAL_MS) && seg.size >= (if(predictsPinyinLive.value) 2 else PREVIEW_MIN_POINTS)) {
                                 lastPreviewMs = change.uptimeMillis
                                 keyList?.let { keys ->
                                     previewedSeg = true
@@ -22338,8 +22379,8 @@ private fun KeyRows(
                                         crossings.withHeld(seg), shiftCuts, shiftCenter, keyWidth.value,
                                         letterGlide.value, endedOnShift = wasOverShift,
                                     )
-                                    if(pinyinMode.value==2) onGesture(pinyinPoints(points),keys,keyWidth.value,
-                                        GlideVerdict.Pinyin(pinyinSession.choices,preview=true,strokeId=down.uptimeMillis)) else if(pinyinMode.value==0) onGesturePreview(
+                                    if(pinyinMode.value!=0) onGesture(pinyinPoints(points),keys,keyWidth.value,
+                                        GlideVerdict.Pinyin(pinyinSession.choices,preview=true,strokeId=down.uptimeMillis)) else onGesturePreview(
                                         points, keys, keyWidth.value,
                                         wordCaseOr(case, letterGlide.value, shiftCrossings),
                                     )
@@ -22451,6 +22492,7 @@ private fun KeyRows(
                         // short by itself, so nothing is glided on the strength
                         // of it either.
                         val floor = when {
+                            predictsPinyinLive.value -> 2
                             octopusFlickWanted -> OCTOPUS_MIN_POINTS
                             wasOpen -> PREVIEW_MIN_POINTS
                             else -> COMMIT_MIN_POINTS
@@ -22479,16 +22521,21 @@ private fun KeyRows(
                         }
                         val verdict = answer.withCases(cases)
                         val keys = keyList
+                        glideFeedback.value()
                         if (words.isNotEmpty() && keys != null) {
                             if (words.size > 1) {
                                 onGestureWords(words, keys, keyWidth.value, verdict)
                             } else {
-                                onGesture(words.first(), keys, keyWidth.value, verdict)
+                                val word = words.first()
+                                val lift = if (predictsPinyinLive.value && verdict is GlideVerdict.Leader) {
+                                    GlideVerdict.Pinyin(strokeId = word.first().t)
+                                } else verdict
+                                onGesture(word, keys, keyWidth.value, lift)
                             }
-                        } else if (segments.isNotEmpty() && keys != null) {
+                        } else if (keys != null && (segments.isNotEmpty() || previewedSeg)) {
                             // Every segment fell under the floor, but the
                             // stroke crossed: end what its previews began.
-                            onGesture(segments.first(), keys, keyWidth.value, GlideVerdict.Cancel)
+                            onGesture(segments.firstOrNull() ?: seg, keys, keyWidth.value, GlideVerdict.Cancel)
                         }
                         trail.release()
                     }
@@ -23837,8 +23884,11 @@ private fun GlideStrokeOverlay(
     // shift key previews "That" and not the "that" it used to (#162): the
     // board's shift never changes for a drawn gesture, and the crossings
     // ride in on the preview instead.
-    val pinyinKeys = state.pinyinGlidePreview?.keyLabels?.takeIf { it.isNotEmpty() && trail.visible && !trail.released && picker.words.isEmpty() }
-    val pillWord = pinyinKeys ?: state.glideWord
+    val liveUi = LocalLiveUiState.current
+    val pinyin = liveUi?.value?.pinyinGlidePreview ?: state.pinyinGlidePreview
+    val pinyinReading = pinyin?.takeUnless { it.settling }?.reading
+        ?.takeIf { it.isNotEmpty() && trail.visible && !trail.released && picker.words.isEmpty() }
+    val pillWord = pinyinReading ?: state.glideWord
         ?.takeIf { glide.wordPreview && trail.visible && !trail.released && picker.words.isEmpty() }
         ?.let { word ->
             state.glideCased[word]
@@ -25116,6 +25166,7 @@ private suspend fun PointerInputScope.twoThumbGlide(
     grid: () -> List<KeyCenter>,
     onGesture: (List<GesturePoint>, List<KeyCenter>, Float, GlideVerdict) -> Unit,
     onGesturePreview: (List<GesturePoint>, List<KeyCenter>, Float, GlideCase) -> Unit,
+    onGlideEnd: () -> Unit,
     swipeClaimed: () -> Boolean,
     /** A key's alternates popup is open: the finger that opened it is choosing in it. */
     alternatesOpen: () -> Boolean,
@@ -25316,6 +25367,7 @@ private suspend fun PointerInputScope.twoThumbGlide(
                         if (tap) trails[stroke.slot].clear() else trails[stroke.slot].release()
                     }
                     if (keys == null) continue
+                    if (!tap) onGlideEnd()
                     when {
                         // A multi-finger swipe took the touch (#647).
                         claimed -> if (stroke.previewed) {

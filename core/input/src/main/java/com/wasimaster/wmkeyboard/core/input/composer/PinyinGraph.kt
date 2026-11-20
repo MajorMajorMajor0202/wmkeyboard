@@ -174,7 +174,6 @@ internal object PinyinGraph {
         // …the furthest one any split reaches, where the convertible part ends…
         var end = n
         while (end > 0 && best[end] == INF) end--
-        if (end == 0) return null
         // …and the fewest from each position on to there.
         val toEnd = IntArray(end + 1) { INF }
         toEnd[end] = 0
@@ -191,7 +190,6 @@ internal object PinyinGraph {
                 if (sp.to <= end && toEnd[sp.to] < INF && best[i] + sp.cost + toEnd[sp.to] == total) kept.add(sp)
             }
         }
-        if (kept.isEmpty()) return null
 
         // A syllable that also reads as two, split where an apostrophe would go.
         val splits = ArrayList<Span>()
@@ -217,10 +215,13 @@ internal object PinyinGraph {
             var start = i
             while (start < n && s[start] == '\'') start++
             val tail = s.substring(start)
-            if (tail.length >= 2 && '\'' !in tail && spellings.completions.containsKey(tail)) {
+            if ('\'' !in tail && spellings.completions.containsKey(tail) &&
+                (jianpin == null || (tail.length > 1 && tail !in Jianpin.DIGRAPHS))
+            ) {
                 partials.add(Span(i, start, n, tail, INITIAL + 1))
             }
         }
+        if (kept.isEmpty() && partials.isEmpty()) return null
 
         val positions = sortedSetOf(0, end)
         for (sp in kept) { positions.add(sp.from); positions.add(sp.to) }
@@ -294,7 +295,7 @@ internal object PinyinGraph {
         }
 
         // The cheapest split's unit count.
-        val unitsOnPath = total % INITIAL
+        val unitsOnPath = if (kept.isEmpty()) 1 else total % INITIAL
         return Built(Lattice.Graph(nodes, Array(nodes.size) { arcs[it] }), unitsOnPath, total >= INITIAL)
     }
 

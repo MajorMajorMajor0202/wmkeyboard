@@ -8,4 +8,5 @@
     <string name="pinyin_glide_mode_syllable">Confirm each two-key syllable</string>
     <string name="pinyin_glide_limit_title">Pause popup limit (Pinyin letters)</string>
     <string name="pinyin_glide_group_title">Chinese Double Pinyin</string>
+    <string name="typing_autocorrect_pinyin_info">For Chinese Pinyin, this switch and the language switch control suggested spelling fixes and nearby-key corrections in double Pinyin glide typing. Raise the confidence slider to offer fewer corrections. You can still select syllables yourself.</string>
 </resources>

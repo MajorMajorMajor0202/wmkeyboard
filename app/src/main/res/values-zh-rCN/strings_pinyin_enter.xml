@@ -5,4 +5,6 @@
     <string name="languages_double_pinyin_display_subtitle">选择输入框显示全拼或实际双拼字母，Enter 按显示方式输出字母。启用双拼方案时生效。</string>
     <string name="languages_double_pinyin_display_full">全拼字母</string>
     <string name="languages_double_pinyin_display_raw">实际输入的双拼字母</string>
+    <string name="languages_pinyin_caret_title">在拼音中移动光标</string>
+    <string name="languages_pinyin_caret_subtitle">用方向键或光标手势移动到尚未选词的拼音中间进行编辑。</string>
 </resources>

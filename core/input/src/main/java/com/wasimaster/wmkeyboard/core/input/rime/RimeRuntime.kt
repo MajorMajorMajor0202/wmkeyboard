@@ -279,15 +279,37 @@ object RimeRuntime {
     internal fun menu(schema: String, options: RimeOptions, input: String, limit: Int): Menu? =
         withSession { session ->
             val offset = syncLocked(session, schema, options, input) ?: return@withSession null
-            val spans = IntArray(limit + 1)
-            val comments = arrayOfNulls<String>(limit)
-            val texts = RimeNative.nativeMenu(session, limit, spans, comments) ?: return@withSession null
-            val chars = byteToChar(mirrorInput)
-            val consumed = IntArray(texts.size) { i ->
-                (chars(spans[i + 1]) - offset).coerceIn(1, input.length.coerceAtLeast(1))
-            }
-            Menu(texts.toList(), consumed, List(texts.size) { i -> comments[i].orEmpty() })
+            readMenu(session, mirrorInput, offset, limit)
         }
+
+    /** Try completed spellings without clearing the typing session's confirmed prefix. */
+    internal fun completionMenus(
+        schema: String, options: RimeOptions, spellings: List<String>, limit: Int,
+    ): List<Pair<String, Menu>> = withSession {
+        val probe = RimeNative.nativeCreateSession()
+        if (probe == 0L) return@withSession emptyList()
+        try {
+            if (!RimeNative.nativeSelectSchema(probe, schema)) return@withSession emptyList()
+            RimeNative.nativeSetOption(probe, "ascii_mode", false)
+            for ((name, value) in options.values) RimeNative.nativeSetOption(probe, name, value)
+            spellings.mapNotNull { spelling ->
+                if (!RimeNative.nativeSetInput(probe, spelling)) return@mapNotNull null
+                readMenu(probe, spelling, 0, limit)?.let { spelling to it }
+            }
+        } finally {
+            RimeNative.nativeDestroySession(probe)
+        }
+    }.orEmpty()
+
+    private fun readMenu(session: Long, input: String, offset: Int, limit: Int): Menu? {
+        val spans = IntArray(limit + 1)
+        val comments = arrayOfNulls<String>(limit)
+        val texts = RimeNative.nativeMenu(session, limit, spans, comments) ?: return null
+        val chars = byteToChar(input)
+        val remaining = (input.length - offset).coerceAtLeast(1)
+        val consumed = IntArray(texts.size) { i -> (chars(spans[i + 1]) - offset).coerceIn(1, remaining) }
+        return Menu(texts.toList(), consumed, List(texts.size) { i -> comments[i].orEmpty() })
+    }
 
     /**
      * Picks candidate [index] of [input]'s menu, which covered [consumed]

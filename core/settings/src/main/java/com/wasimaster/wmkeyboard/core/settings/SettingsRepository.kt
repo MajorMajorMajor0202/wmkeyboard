@@ -6693,6 +6693,7 @@ data class CjkSettings(
      * as every Chinese layout here always has.
      */
     val readingInField: Boolean = true,
+    val pinyinCaretInReading: Boolean = true,
     /** Chinese and Cantonese: what a language switch does with a reading not yet converted (#973). */
     val readingOnSwitch: ReadingOnSwitch = ReadingOnSwitch.CONVERT,
     /**
@@ -13002,6 +13003,7 @@ class SettingsRepository(private val context: Context) {
         private val CJK_TRADITIONAL_OUTPUT = booleanPreferencesKey("cjk_traditional_output")
         private val CJK_TRADITIONAL_BUTTON = booleanPreferencesKey("cjk_traditional_button")
         private val CJK_READING_IN_FIELD = booleanPreferencesKey("cjk_reading_in_field")
+        private val PINYIN_CARET_IN_READING = booleanPreferencesKey("pinyin_caret_in_reading")
         private val CJK_READING_ON_SWITCH = stringPreferencesKey("cjk_reading_on_switch")
         private val JYUTPING_LAZY = booleanPreferencesKey("jyutping_lazy")
         private val HANJA_SUGGESTIONS = booleanPreferencesKey("hanja_suggestions")
@@ -15251,6 +15253,7 @@ class SettingsRepository(private val context: Context) {
             traditionalOutput = p[CJK_TRADITIONAL_OUTPUT] ?: defaults.cjk.traditionalOutput,
             traditionalButton = p[CJK_TRADITIONAL_BUTTON] ?: defaults.cjk.traditionalButton,
             readingInField = p[CJK_READING_IN_FIELD] ?: defaults.cjk.readingInField,
+            pinyinCaretInReading = p[PINYIN_CARET_IN_READING] ?: defaults.cjk.pinyinCaretInReading,
             readingOnSwitch = p[CJK_READING_ON_SWITCH]
                 ?.let { runCatching { ReadingOnSwitch.valueOf(it) }.getOrNull() }
                 ?: defaults.cjk.readingOnSwitch,
@@ -24775,6 +24778,9 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setCjkReadingInField(value: Boolean) =
         editPrefs { it[CJK_READING_IN_FIELD] = value }
+
+    suspend fun setPinyinCaretInReading(value: Boolean) =
+        editPrefs { it[PINYIN_CARET_IN_READING] = value }
 
     suspend fun setCjkReadingOnSwitch(value: ReadingOnSwitch) =
         editPrefs { it[CJK_READING_ON_SWITCH] = value.name }

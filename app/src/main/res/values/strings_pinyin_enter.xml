@@ -5,4 +5,6 @@
     <string name="languages_double_pinyin_display_subtitle">Enter commits the letters shown here. Applies when a Double Pinyin scheme is enabled.</string>
     <string name="languages_double_pinyin_display_full">Full Pinyin</string>
     <string name="languages_double_pinyin_display_raw">Typed Double Pinyin letters</string>
+    <string name="languages_pinyin_caret_title">Move cursor within Pinyin</string>
+    <string name="languages_pinyin_caret_subtitle">Arrow keys and cursor gestures can edit the Pinyin still being composed.</string>
 </resources>

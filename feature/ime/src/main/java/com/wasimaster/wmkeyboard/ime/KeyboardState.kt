@@ -3697,6 +3697,8 @@ data class KeyboardUiState(
      * composer but T9 pinyin, and once every syllable is settled.
      */
     val conversionReadings: List<String> = emptyList(),
+    val pinyinCorrectionBuffer: String = "",
+    val pinyinReadingCorrections: Map<String, PinyinReadingCorrection> = emptyMap(),
     val conversionReadingHints: Map<String, ConversionReadingHint> = emptyMap(),
     /**
      * Desktop Avro's candidate list for the word being typed, for the row
@@ -3876,6 +3878,7 @@ data class KeyboardUiState(
      */
     val sentenceOpeners: List<String> = emptyList(),
     val composingPreview: String = "",
+    val stripReadingCaret: Int = -1,
     /** Reading in the currently focused keyboard-owned conversion field. */
     val captureReading: String = "",
     /**
@@ -5661,6 +5664,15 @@ data class ToolTextEntries(
 /** Relative ranking evidence, not a calibrated probability. Offset is in physical key widths. */
 data class ConversionReadingHint(val weight: Float, val deviation: Float, val neighbour: Boolean, val selected: Boolean = false)
 
+data class PinyinReadingCorrection(
+    val reading: String,
+    val slot: Int,
+    val replacement: String,
+    val start: Int,
+    val end: Int,
+)
+
+internal const val PinyinCorrectionPrefix = "@pinyin-slot:"
 internal const val EditGlideReading = "@glide:edit"
 
 internal const val UndoReadingSelection="@glide:undo-reading"

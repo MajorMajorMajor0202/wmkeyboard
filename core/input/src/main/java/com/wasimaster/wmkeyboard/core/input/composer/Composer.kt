@@ -85,6 +85,12 @@ interface Composer {
     fun backspaceBuffer(buffer: String): String =
         if (buffer.isEmpty()) buffer else buffer.dropLast(1)
 
+    /** Backspaces within a reading, returning the edited buffer and its new caret. */
+    fun backspaceReading(buffer: String, caret: Int): Pair<String, Int> {
+        val head = backspaceBuffer(buffer.substring(0, caret))
+        return (head + buffer.substring(caret)) to head.length
+    }
+
     /**
      * The language whose dictionary a phonetic transliterator is ranked against
      * (`"bn"` for Avro), by `LanguageDef.id`: its commit and suggestions route
@@ -486,6 +492,10 @@ interface Composer {
      */
     fun previewOffset(buffer: String, index: Int): Int =
         composeBuffer(buffer.substring(0, index.coerceIn(0, buffer.length))).length
+
+    /** Moves through editable buffer positions; opaque reading selections may span several units. */
+    fun moveReadingIndex(buffer: String, index: Int, delta: Int): Int =
+        (index + delta).coerceIn(0, buffer.length)
 
     /**
      * The buffer position for a caret put at [offset] in [composeBuffer]'s

@@ -38,6 +38,24 @@ class PinyinLoopRegressionTest {
         assertEquals(listOf(0, 0, 1), DoublePinyinGlide.intentKeys(path, keys))
     }
 
+    @Test fun `a rounded horizontal return is not a same key circle`() {
+        val df = DoublePinyinGlide.Key("df", 0.0, 0.0, 2.0)
+        val keys = listOf(df, DoublePinyinGlide.Key("gh", 1.0, 0.0, 2.0))
+        val crossing = circle(0.36, x = 0.33).let { it.drop(16) + it.take(17) }
+        assertFalse(DoublePinyinGlide.hasLoop(crossing, keys))
+        assertEquals(listOf(0, 1, 0), DoublePinyinGlide.intentKeys(crossing, keys))
+
+        val narrowReturn = circle(0.48).map { it.copy(y = it.y * 0.20) }
+        assertFalse(DoublePinyinGlide.hasLoop(narrowReturn, listOf(df)))
+        assertTrue(DoublePinyinGlide.hasLoop(circle(0.30), keys))
+        val table = DoublePinyin.tableFor(DoublePinyinScheme.XIAOHE)!!
+        val dictionary = ConversionDictionary.parse(sequenceOf("dai\t带\t100"))
+        fun decode(path: List<DoublePinyinGlide.Point>) =
+            DoublePinyinGlide.decode(path, keys, table, setOf("dai"), true, dictionary, CjkNgrams.EMPTY)
+        assertFalse(decode(narrowReturn).any { it.reading == "dai" })
+        assertEquals("dai", decode(circle(0.30)).firstOrNull()?.reading)
+    }
+
     @Test fun `a pure loop has a finite repeated-key search cost`() {
         val keys = listOf(DoublePinyinGlide.Key("x", 0.0, 0.0), DoublePinyinGlide.Key("n", 1.0, 0.0))
         val search = DoublePinyinGlide.Search(circle(0.24), keys, listOf("xx", "xn"))

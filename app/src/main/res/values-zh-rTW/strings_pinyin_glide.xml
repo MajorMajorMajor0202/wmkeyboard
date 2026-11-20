@@ -8,4 +8,5 @@
     <string name="pinyin_glide_mode_syllable">每两个键确认音节</string>
     <string name="pinyin_glide_limit_title">停留弹窗上限（拼音字母数）</string>
     <string name="pinyin_glide_group_title">中文双拼</string>
+    <string name="typing_autocorrect_pinyin_info">對於中文拼音，此開關與語言內的開關控制更正候選，以及雙拼滑行時的鄰鍵更正。提高置信度會減少更正。你仍可以手動選擇音節。</string>
 </resources>

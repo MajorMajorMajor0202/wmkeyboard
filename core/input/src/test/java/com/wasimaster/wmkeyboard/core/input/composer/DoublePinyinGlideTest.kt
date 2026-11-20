@@ -28,6 +28,64 @@ class DoublePinyinGlideTest {
             add(DoublePinyinGlide.Point(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f))
         }
     }
+    @Test fun `returning across adjacent compact keys keeps both syllables of dagai`() {
+        val active = setOf("da", "gai", "dai", "den", "fa", "sang", "gang", "geng", "hang", "hai", "hen", "ha")
+        val dictionary = ConversionDictionary.parse(sequenceOf(
+            "da\t大\t852", "gai\t概\t805", "dagai\t大概\t644", "dai\t带\t892", "fa\t发\t840",
+            "sang\t桑\t400", "gang\t刚\t860", "geng\t更\t900", "hang\t行\t830", "hai\t还\t916", "hen\t很\t940",
+        ))
+        for (pitch in listOf(1.0, 2.0)) {
+            val keys = listOf("as", "df", "gh").mapIndexed { index, letters ->
+                DoublePinyinGlide.Key(letters, (index - 1) * pitch, 0.0, pitch)
+            }
+            val paths = listOf(
+                points("dagd", keys),
+                listOf(0.0 to 0.0, -0.45 to -0.11, -0.65 to 0.08, -0.45 to 0.30,
+                    0.0 to 0.44, 0.45 to 0.34, 0.65 to 0.12, 0.45 to -0.04, 0.0 to 0.0)
+                    .map { (x, y) -> DoublePinyinGlide.Point(x * pitch, y) },
+            )
+            for (path in paths) {
+                assertEquals("$pitch $path", listOf(1, 0, 2, 1), DoublePinyinGlide.intentKeys(path, keys))
+                for (live in listOf(false, true)) {
+                    val results = DoublePinyinGlide.decode(path, keys, table, active, true, dictionary, CjkNgrams.EMPTY, live = live)
+                    assertEquals("$pitch $live ${results.take(4)}", "dagai", results.firstOrNull()?.reading)
+                }
+            }
+        }
+    }
+
+    @Test fun `rounded turns and an early lift keep ni de on merged keys`() {
+        val dictionary = ConversionDictionary.parse(sequenceOf(
+            "ni\t你\t1000", "bi\t比\t800", "de\t的\t1000", "shai\t晒\t800", "tai\t太\t900",
+            "ban\t班\t900", "nan\t难\t800", "fen\t分\t900", "ning\t宁\t400",
+        ))
+        val ngrams = CjkNgrams.parse(sequenceOf("你\t5000", "的\t9000", "你\t的\t3000"))
+        val active = setOf("ni", "bi", "de", "shai", "tai", "ban", "nan", "fen", "ning")
+        val keys = listOf(
+            DoublePinyinGlide.Key("er", 3.0, 0.0), DoublePinyinGlide.Key("ty", 5.0, 0.0),
+            DoublePinyinGlide.Key("ui", 7.0, 0.0), DoublePinyinGlide.Key("df", 3.0, 1.15),
+            DoublePinyinGlide.Key("gh", 5.0, 1.15), DoublePinyinGlide.Key("jk", 7.0, 1.15),
+            DoublePinyinGlide.Key("bn", 7.0, 2.30),
+        )
+        fun point(c: Char) = keys.first { c in it.letters }.let { DoublePinyinGlide.Point(it.x, it.y) }
+        fun toward(a: DoublePinyinGlide.Point, b: DoublePinyinGlide.Point, fraction: Double) =
+            DoublePinyinGlide.Point(a.x + (b.x - a.x) * fraction, a.y + (b.y - a.y) * fraction)
+
+        val (n, i, d, e) = "nide".map(::point)
+        for ((cut, lift) in listOf(0.28 to 0.43, 0.25 to 0.55)) {
+            val turns = listOf(n, toward(i, n, cut), toward(i, d, cut),
+                toward(d, i, cut * 0.45), toward(d, e, cut), toward(e, d, lift))
+            val path = turns.zipWithNext().flatMap { (a, b) -> (0..5).map { toward(a, b, it / 5.0) } }
+                .mapIndexed { index, point -> point.copy(t = index * 8L) }
+            for (live in listOf(false, true)) {
+                val results = DoublePinyinGlide.decode(path, keys, table, active, true, dictionary, ngrams, live = live)
+                assertEquals("$cut $lift $live ${results.take(4)}", "nide", results.firstOrNull()?.reading)
+                val buffer = DoublePinyinGlide.bufferFor(results.first(), table, active, true)!!
+                assertEquals(listOf("ni", "de"), DoublePinyinGlide.syllableBuffers(buffer, table, active, true).map { it.first })
+            }
+        }
+    }
+
     @Test fun `unlisted phrase survives both Compact and ordinary double Pinyin search`() {
         for (compact in listOf(true, false)) {
             val keys = keys(compact)
@@ -132,6 +190,14 @@ class DoublePinyinGlideTest {
         assertTrue(corrected.score<result.first().score)
         assertTrue(corrected.deviation>result.first().deviation)
         assertTrue(result.size<=80)
+
+        for (correction in listOf(null, PinyinCorrection.Tuning(confidence = 10.0))) {
+            val strict = DoublePinyinGlide.decode(
+                path, keys, scheme, setOf("ni", "bi"), false, dictionary, CjkNgrams.EMPTY, correction = correction,
+            )
+            assertEquals("ni", strict.first().reading)
+            assertTrue(strict.none { it.neighbour })
+        }
     }
     @Test fun `an explicit full reading constrains all ambiguous syllables`() {
         val active=inventory+"bi"

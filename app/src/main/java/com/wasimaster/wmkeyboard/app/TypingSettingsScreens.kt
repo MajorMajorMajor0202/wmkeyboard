@@ -333,7 +333,8 @@ internal fun TypingCorrectionsSettings(
                 R.string.typing_autocorrect_title,
                 stringResource(R.string.typing_autocorrect_subtitle),
                 autocorrectOn,
-                info = stringResource(R.string.typing_autocorrect_info),
+                info = stringResource(R.string.typing_autocorrect_info) + "\n\n" +
+                    stringResource(R.string.typing_autocorrect_pinyin_info),
                 default = SettingsDefaults.correction.enabled,
             ) { scope.launch { repository.setAutocorrect(it) } }
         }

@@ -7,7 +7,7 @@ import com.wasimaster.wmkeyboard.core.layout.LayoutLayer
 import com.wasimaster.wmkeyboard.core.layout.LayoutSpec
 import com.wasimaster.wmkeyboard.core.layout.compile
 import com.wasimaster.wmkeyboard.ime.LayoutSet
-import com.wasimaster.wmkeyboard.ime.keySpelling
+import com.wasimaster.wmkeyboard.ime.glideAnchor
 
 /**
  * A real shipped layout's letter grid, laid out the way the renderer lays it
@@ -91,10 +91,8 @@ class GlideGrid private constructor(
                         shift = Cell(x, index - 0.5f, x + key.width, index + 0.5f)
                     }
                     x += key.width
-                    // Anchored by the first character the key writes, matching
-                    // what the renderer reports — a Bengali nukta key writes
-                    // two characters and would vanish from a "exactly one" test.
-                    val anchor = keySpelling(key.label)?.first() ?: continue
+                    // Match the renderer, including multi-letter labels such as DF.
+                    val anchor = key.glideAnchor() ?: continue
                     centres.putIfAbsent(anchor, centre to index.toFloat())
                 }
             }

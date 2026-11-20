@@ -1,7 +1,13 @@
 package com.wasimaster.wmkeyboard.core.input.rime
 
-import com.wasimaster.wmkeyboard.core.input.composer.HanVariant
+import com.wasimaster.wmkeyboard.core.input.composer.CjkConfig
+import com.wasimaster.wmkeyboard.core.input.composer.CjkContext
+import com.wasimaster.wmkeyboard.core.input.composer.CjkDictionaries
 import com.wasimaster.wmkeyboard.core.input.composer.Composer
+import com.wasimaster.wmkeyboard.core.input.composer.DoublePinyin
+import com.wasimaster.wmkeyboard.core.input.composer.HanVariant
+import com.wasimaster.wmkeyboard.core.input.composer.PinyinSpellings
+import com.wasimaster.wmkeyboard.core.input.composer.PinyinSyllables
 import com.wasimaster.wmkeyboard.core.input.composer.T9Pinyin
 
 /**
@@ -64,8 +70,10 @@ class RimeComposer internal constructor(
         val consumed: IntArray?,
         /** Each candidate's spelling as RIME hints it (`xi an`), or empty; null when [base] ranked it. */
         val comments: List<String>?,
-        /** RIME's own menu position for each candidate; null when [base] ranked it. */
+        /** RIME positions, or minus one minus the built-in position for an added fallback. */
         val menuIndex: IntArray? = null,
+        /** An extended spelling submitted to RIME for a still-unfinished reading. */
+        val completedInputs: Map<Int, String> = emptyMap(),
     )
 
     @Volatile private var last: Ranked? = null
@@ -74,6 +82,8 @@ class RimeComposer internal constructor(
     override val resumesComposedText: Boolean get() = base.resumesComposedText
     override fun resumeBuffer(text: String): String? = base.resumeBuffer(text)
     override fun backspaceBuffer(buffer: String): String = base.backspaceBuffer(buffer)
+    override fun backspaceReading(buffer: String, caret: Int): Pair<String, Int> =
+        base.backspaceReading(buffer, caret)
     override fun deleteLength(before: CharSequence): Int = base.deleteLength(before)
     override val isRomanBuffer: Boolean get() = base.isRomanBuffer
     override val bufferDigits: Boolean get() = base.bufferDigits
@@ -89,6 +99,12 @@ class RimeComposer internal constructor(
 
     /** Not on the 9-key pad, which shows RIME's spelling rather than the keys. */
     override val editsReadingInPlace: Boolean get() = method != RimeMethod.T9_PINYIN && base.editsReadingInPlace
+    override fun previewOffset(buffer: String, index: Int): Int =
+        if (editsReadingInPlace) base.previewOffset(buffer, index) else super.previewOffset(buffer, index)
+    override fun bufferIndex(buffer: String, offset: Int): Int =
+        if (editsReadingInPlace) base.bufferIndex(buffer, offset) else super.bufferIndex(buffer, offset)
+    override fun moveReadingIndex(buffer: String, index: Int, delta: Int): Int =
+        base.moveReadingIndex(buffer, index, delta)
     override val readsLatinLetters: Boolean get() = base.readsLatinLetters
     override fun pickReading(buffer: String, reading: String): String? = base.pickReading(buffer, reading)
 
@@ -154,28 +170,57 @@ class RimeComposer internal constructor(
             return
         }
         val consumed = ranked.consumed.getOrNull(index) ?: return
-        val input = RimeKeys.translate(method, buffer)
         val menuIndex = ranked.menuIndex?.getOrNull(index) ?: return
+        if (menuIndex < 0) {
+            base.learnChoice(buffer, -menuIndex - 1)
+            last = null
+            return
+        }
+        ranked.completedInputs[index]?.let { completed ->
+            RimeRuntime.pick(schema, options(), completed, menuIndex, completed.length)
+            last = null
+            return
+        }
+        val input = RimeKeys.translate(method, buffer)
         RimeRuntime.pick(schema, options(), input.input, menuIndex, inputCharsFor(input, consumed))
         last = null
     }
 
     private fun ranked(buffer: String): Ranked {
+        val table = if (method == RimeMethod.PINYIN) DoublePinyin.tableFor(CjkConfig.doublePinyin) else null
         // RIME schemas do not share the app's selected fuzzy groups or literal-final aliases.
-        if(method==RimeMethod.PINYIN &&
-            (com.wasimaster.wmkeyboard.core.input.composer.CjkConfig.fuzzyPinyin ||
-                com.wasimaster.wmkeyboard.core.input.composer.CjkConfig.doublePinyinLiteralFinals) &&
-            com.wasimaster.wmkeyboard.core.input.composer.DoublePinyin.tableFor(
-                com.wasimaster.wmkeyboard.core.input.composer.CjkConfig.doublePinyin)!=null) {
+        if (table != null && !CjkDictionaries.pinyin.isEmpty &&
+            (CjkConfig.fuzzyPinyin || CjkConfig.doublePinyinLiteralFinals)
+        ) {
             return Ranked("",-1,base.candidates(buffer,DEPTH),null,null)
         }
         val opts = options()
         // The region and whether its tables have landed change the text too.
-        val key = "$schema|$opts|${HanVariant.region}|${HanVariant.s2t.isEmpty()}|$buffer"
+        val context = if (method == RimeMethod.PINYIN) CjkContext.before else ""
+        val key = "$schema|$opts|${HanVariant.region}|${HanVariant.s2t.isEmpty()}|${CjkDictionaries.generation}|$context|$buffer"
         val generation = RimeRuntime.generation
         last?.takeIf { it.key == key && it.generation == generation }?.let { return it }
         val input = RimeKeys.translate(method, buffer)
         val menu = if (input.input.isEmpty()) null else RimeRuntime.menu(schema, opts, input.input, DEPTH)
+        if (menu != null && method == RimeMethod.PINYIN) {
+            val hasFullHan = menu.texts.indices.any { index ->
+                input.bufferChars(menu.consumed[index]) == buffer.length && isHan(menu.texts[index])
+            }
+            val lastKey = input.input.trimEnd('\'').lastOrNull()
+            val zeroLead = lastKey != null && lastKey in (table?.zeroLeads ?: DoublePinyin.DEFAULT_ZERO_LEADS)
+            val spellings = if (!hasFullHan || zeroLead) completeSpellings(input.input, table) else emptyList()
+            if (spellings.isNotEmpty()) {
+                val builtIn = base.candidates(buffer, DEPTH).mapIndexedNotNull { index, text ->
+                    if (isHan(text) && base.consumedForIndex(buffer, index) == buffer.length) {
+                        Completion(text, "", -index - 1)
+                    } else null
+                }
+                val completions = builtIn.ifEmpty { nativeCompletions(opts, spellings) }
+                if (completions.isNotEmpty()) {
+                    return rankCompletions(buffer, key, generation, input, menu, completions, hasFullHan).also { last = it }
+                }
+            }
+        }
         val ranked = if (menu != null) {
             // Two forms can come out as one (裏 and 裡 under Taiwan), and the
             // strip wants each word once: the first keeps its place.
@@ -198,13 +243,74 @@ class RimeComposer internal constructor(
         return ranked
     }
 
+    private fun completeSpellings(input: String, table: DoublePinyin.Table?): List<String> {
+        val typed = input.trimEnd('\'')
+        val valid = PinyinSyllables.valid
+        if (table != null) {
+            val end = DoublePinyin.segments(typed, table, valid).sumOf { it.inputLen }
+            val first = DoublePinyin.pendingFirstKey(typed, end) ?: return emptyList()
+            return DoublePinyin.firstKeyCodes(first, table, valid).keys.map { typed + it.last() }
+        }
+        val segments = PinyinSyllables.segment(typed)
+        val end = segments.sumOf { it.inputLen }
+        val tail = if (end == typed.length) {
+            segments.lastOrNull()?.syllable?.takeIf { it.length == 1 && it[0] in DoublePinyin.DEFAULT_ZERO_LEADS }
+                ?: return emptyList()
+        } else typed.substring(end).trimStart('\'')
+        return PinyinSpellings.of(valid).completions[tail].orEmpty().map { typed + it.drop(tail.length) }
+    }
+
+    private fun isHan(text: String): Boolean = text.isNotEmpty() &&
+        text.codePoints().allMatch { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }
+
+    private data class Completion(val text: String, val comment: String, val position: Int, val spelling: String? = null)
+
+    private fun nativeCompletions(opts: RimeOptions, spellings: List<String>): List<Completion> =
+        RimeRuntime.completionMenus(schema, opts, spellings, COMPLETION_DEPTH).flatMap { (spelling, expanded) ->
+            expanded.texts.mapIndexedNotNull { index, text ->
+                if (expanded.consumed[index] == spelling.length && isHan(text)) {
+                    Completion(text, expanded.comments[index], index, spelling)
+                } else null
+            }
+        }.sortedBy { it.position }
+
+    private fun rankCompletions(
+        buffer: String, key: String, generation: Int,
+        input: RimeInput, menu: RimeRuntime.Menu, choices: List<Completion>,
+        preserveNativeLeader: Boolean,
+    ): Ranked {
+        val texts = mutableListOf<String>()
+        val comments = mutableListOf<String>()
+        val consumed = mutableListOf<Int>()
+        val positions = mutableListOf<Int>()
+        val completedInputs = mutableMapOf<Int, String>()
+        val seen = HashSet<String>()
+        fun add(text: String, comment: String, end: Int, position: Int, spelling: String? = null) {
+            val shown = HanVariant.localize(text)
+            if (texts.size == DEPTH || !seen.add(shown)) return
+            if (spelling != null) completedInputs[texts.size] = spelling
+            texts.add(shown)
+            comments.add(comment)
+            consumed.add(end)
+            positions.add(position)
+        }
+        fun addNative(i: Int) = add(menu.texts[i], menu.comments[i], input.bufferChars(menu.consumed[i]), i)
+        if (preserveNativeLeader) addNative(0)
+        for (choice in choices) add(choice.text, choice.comment, buffer.length, choice.position, choice.spelling)
+        for (i in menu.texts.indices) addNative(i)
+        return Ranked(key, generation, texts, consumed.toIntArray(), comments, positions.toIntArray(), completedInputs)
+    }
+
     /**
      * The key a candidate floats over (#1063), from RIME's own spelling of it.
      * Full pinyin only: on the other boards the keys do not spell that comment.
      */
     override fun nextReadingLetter(buffer: String, index: Int): Char? {
         if (method != RimeMethod.PINYIN) return null
-        val comments = ranked(buffer).comments ?: return base.nextReadingLetter(buffer, index)
+        val rank = ranked(buffer)
+        rank.completedInputs[index]?.let { return it.getOrNull(buffer.trimEnd('\'').length) }
+        rank.menuIndex?.getOrNull(index)?.takeIf { it < 0 }?.let { return base.nextReadingLetter(buffer, -it - 1) }
+        val comments = rank.comments ?: return base.nextReadingLetter(buffer, index)
         return commentNextLetter(comments.getOrNull(index) ?: return null, buffer)
     }
 
@@ -281,5 +387,6 @@ class RimeComposer internal constructor(
 
         /** How deep a reading is ranked; the expanded grid pages through this. */
         const val DEPTH = 100
+        const val COMPLETION_DEPTH = 4
     }
 }

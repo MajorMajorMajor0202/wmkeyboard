@@ -6,9 +6,11 @@ import kotlin.math.hypot
 
 /** Opaque composer buffers preserve the selected physical groups and syllable boundaries. */
 data class PinyinGlideChoice(val reading: String,val buffer: String,
-    val parts: List<PinyinGlideChoice> = emptyList(),val stroke: List<GesturePoint> = emptyList(),val pairSlot: Int = -1)
+    val parts: List<PinyinGlideChoice> = emptyList(),val stroke: List<GesturePoint> = emptyList(),val pairSlot: Int = -1,
+    val rawBuffer: String? = null,
+    val hint: com.wasimaster.wmkeyboard.ime.ConversionReadingHint? = null)
 data class PinyinGlidePreview(val start: Long,val end: Long,val choices: List<PinyinGlideChoice>,val keys: Int,
-    val keyLabels: String = "")
+    val reading: String = "", val words: List<String> = emptyList(), val settling: Boolean = false)
 
 internal class PinyinGlideSession {
     private data class Checkpoint(val choice: PinyinGlideChoice,val points: List<GesturePoint>)
@@ -21,7 +23,7 @@ internal class PinyinGlideSession {
     fun undo(): List<GesturePoint>? = if(history.isEmpty()) null else history.removeAt(history.lastIndex).points
 
     companion object {
-        /** Core visits with hysteresis. A departure and return can intentionally repeat a key. */
+        /** Use the decoder's deliberate turns, stops and local circles. */
         fun visits(points: List<DoublePinyinGlide.Point>,keys: List<DoublePinyinGlide.Key>): List<Int> =
             DoublePinyinGlide.intentKeys(points,keys)
     }

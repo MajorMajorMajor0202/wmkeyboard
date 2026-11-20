@@ -10,10 +10,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\cleanup-local-hist
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     # Workspace containing outputs/ and work/phone-backups/, not the Git checkout.
-    [string]$ProjectRoot = (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
+    [string]$ProjectRoot
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+    $ProjectRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+}
 
 function Assert-PlainPath([string]$Path) {
     $item = Get-Item -LiteralPath $Path -Force
@@ -50,8 +53,13 @@ if ($manifest.package -ne 'com.wasimaster.wmkeyboard') {
 foreach ($label in @('credential', 'device')) {
     $archive = Assert-PlainPath (Join-Path $keepBackup.FullName ($label + '.tar'))
     $entry = $manifest.archives.$label
+    $previewMode = $WhatIfPreference
+    try {
+        $WhatIfPreference = $false
+        $archiveHash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash
+    } finally { $WhatIfPreference = $previewMode }
     if ($null -eq $entry -or $archive.Length -ne $entry.bytes -or
-        (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash -ne $entry.sha256) {
+        $archiveHash -ne $entry.sha256) {
         throw "Latest backup failed verification: $label. Nothing was removed."
     }
 }

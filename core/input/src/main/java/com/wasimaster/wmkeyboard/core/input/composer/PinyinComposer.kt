@@ -1,6 +1,7 @@
 package com.wasimaster.wmkeyboard.core.input.composer
 
 import kotlin.math.ln
+import kotlin.math.ln1p
 
 /**
  * Chinese Pinyin input. The roman buffer is toneless pinyin (or Double Pinyin
@@ -29,6 +30,18 @@ object PinyinComposer : Composer {
     override fun backspaceBuffer(buffer: String): String =
         if (CjkConfig.doublePinyinSyllableDelete && DoublePinyin.tableFor(CjkConfig.doublePinyin) != null)
             DoublePinyin.backspaceSyllable(buffer) else super.backspaceBuffer(buffer)
+
+    override fun backspaceReading(buffer: String, caret: Int): Pair<String, Int> {
+        if (caret == 0 || !CjkConfig.doublePinyinSyllableDelete || doublePinyinTable() == null ||
+            (CjkConfig.pinyinShortcuts && PinyinShortcuts.isNumber(buffer))
+        ) return super.backspaceReading(buffer, caret)
+        val reading = buffer.substringBefore(STROKE_MARK)
+        if (caret > reading.length) return super.backspaceReading(buffer, caret)
+        val key = DoublePinyin.lastKeyBeforeCaret(reading, caret)
+        if (key < 0) return super.backspaceReading(buffer, caret)
+        val (edited, nextCaret) = DoublePinyin.removeSyllable(reading, DoublePinyin.syllableAt(reading, key))
+        return (edited + buffer.substring(reading.length)) to nextCaret
+    }
 
     override val glidesPinyinReadings: Boolean get() = true
 
@@ -144,6 +157,10 @@ object PinyinComposer : Composer {
 
     /** Longest context suffix [predictions] looks a follower up for. */
     private const val PREDICT_CONTEXT = 4
+    private const val WORD_FOLLOWER_POOL = 48
+    private const val SINGLE_CHAR_FOLLOWER_POOL = 16
+    private const val PHRASE_FOLLOWERS = 8
+    private const val MAX_PREDICTED_PHRASES = 2
 
     /**
      * What finishing a word costs against a word that follows one (无 → 聊
@@ -341,71 +358,16 @@ object PinyinComposer : Composer {
     }
 
     /**
-     * Jianpin's index while it applies: full pinyin with the switch on. Under
-     * Double Pinyin a syllable is always two keys, so there is nothing to
-     * abbreviate and the index is left out of the segmentation entirely. An
-     * empty custom scheme types full pinyin, so it keeps Jianpin too.
+     * Jianpin is available in full pinyin. Double Pinyin completes its final
+     * unpaired key using the scheme's own codes.
      */
     private fun jianpin(): Jianpin.Index? =
-        if (CjkConfig.jianpin && doublePinyinTable() == null) Jianpin.index else null
-
-    /**
-     * Syllables of [buffer] with per-syllable input spans, in the active input
-     * mode. With Jianpin on the inventory also holds every initial, so `hd`
-     * splits into `h` and `d`; a full syllable is always longer than its own
-     * initial, so the longest-first walk keeps `nihao` as `ni` + `hao`.
-     */
-    private fun segments(buffer: String): List<Seg> {
-        val table = doublePinyinTable()
-        if (table != null) return DoublePinyin.segments(buffer, table, PinyinSyllables.valid)
-        val jianpin = jianpin()
-        return if (jianpin != null && jianpin.units.isNotEmpty()) PinyinSyllables.segment(buffer, jianpin.units)
-        else PinyinSyllables.segment(buffer)
-    }
-
-    /**
-     * The lattice input for [segs]: one unit per syllable, each offering the
-     * syllable as typed, then — with Fuzzy Pinyin on — a couple of confusable
-     * spellings behind a penalty, then — with Jianpin on — every syllable an
-     * abbreviated unit could stand for. A bare initial has no as-typed reading,
-     * so its options are abbreviations alone; `a`, `e` and `o` are both.
-     *
-     * The variants are *options*, not readings. Building the cartesian product
-     * of readings was what forced a cap, and the cap dropped real candidates;
-     * the decoder instead prunes each variant against the dictionary before
-     * extending it, so an impossible spelling costs one binary search.
-     */
-    private fun latticeInput(segs: List<Seg>): Lattice.Input {
-        val n = segs.size
-        val boundaries = IntArray(n + 1)
-        for (i in 0 until n) boundaries[i + 1] = boundaries[i] + segs[i].inputLen
-        val fuzzy = CjkConfig.fuzzyPinyin
-        val fuzzyPairs = CjkConfig.fuzzyPinyinPairs
-        val valid = PinyinSyllables.valid
-        val jianpin = jianpin()
-        val units = List(n) { i -> unitOptions(segs[i].syllable, valid, fuzzy, fuzzyPairs, jianpin) }
-        // A typed digraph reads both ways: `sh` is s + h (上海) by segmentation,
-        // and the initial sh… (是) by merging the two units. An apostrophe
-        // between them is the user's own boundary, so it blocks the merge.
-        val merged = Array(n) { i ->
-            val digraph = segs[i].syllable + segs.getOrNull(i + 1)?.syllable
-            if (jianpin == null || i + 1 >= n || segs[i + 1].inputLen != 1 || digraph !in Jianpin.DIGRAPHS) emptyArray()
-            else jianpin.expansions[digraph].orEmpty().toTypedArray()
-        }
-        return Lattice.Input(
-            boundaries,
-            Array(n) { units[it].readings },
-            Array(n) { units[it].costs },
-            IntArray(n) { units[it].partialFrom },
-            merged,
-            Array(n) { DoubleArray(merged[it].size) { PARTIAL_PENALTY } },
-        )
-    }
+        if (CjkConfig.jianpin && doublePinyinTable() == null) Jianpin.index.takeIf { it.units.isNotEmpty() } else null
 
     /**
      * The arcs one span of the buffer contributes to the graph: [unit] as typed
-     * with its fuzzy variants and abbreviations, the way [latticeInput] reads a
-     * unit; a digraph's merged syllables; or a mistyped key's repair.
+     * with its fuzzy variants and abbreviations, or another reading of a
+     * digraph, an unfinished syllable or a mistyped key.
      */
     private fun arcsFor(unit: String, to: Int, kind: PinyinGraph.Kind): List<Lattice.Arc> = when (kind) {
         PinyinGraph.Kind.UNIT -> {
@@ -553,11 +515,10 @@ object PinyinComposer : Composer {
         val dict = CjkDictionaries.pinyin
         val graph: Lattice.Graph?
         val stitch: Int
-        if (doublePinyinTable() != null) {
-            // Every syllable is two keys, so there is exactly one way to split
-            // the buffer and nothing for a graph to choose between.
-            val segs = segments(buffer)
-            graph = if (segs.isEmpty() || segs.size > MAX_LATTICE_UNITS) null else Lattice.graph(latticeInput(segs))
+        val table = doublePinyinTable()
+        if (table != null) {
+            graph = DoublePinyin.fuzzyGraph(buffer, table, PinyinSyllables.valid, completeTail = true)
+                .takeIf { it.end in 1..MAX_LATTICE_UNITS }
             stitch = 0
         } else {
             val built = PinyinGraph.build(buffer, PinyinSyllables.valid, jianpin(), ::arcsFor)
@@ -580,7 +541,7 @@ object PinyinComposer : Composer {
                 .flatMap { word -> HanVariant.traditionalForms(word).map { Cand(it, buffer.length, buffer, word) } }
                 .distinctBy { it.text }
         }
-        val opts = Lattice.Opts(maxWordUnits = PHRASE_SYLLABLES, limit = LOOKUP_LIMIT, stitch = stitch, coverageOrder = true, hanLevels = true, maxAmbiguousSpan=if(doublePinyinTable()!=null) Int.MAX_VALUE else 2)
+        val opts = Lattice.Opts(maxWordUnits = PHRASE_SYLLABLES, limit = LOOKUP_LIMIT, stitch = stitch, coverageOrder = true, hanLevels = true, maxAmbiguousSpan=if(table!=null) Int.MAX_VALUE else 2)
         val decoded = Lattice.decode(
             graph,
             dict,
@@ -609,24 +570,22 @@ object PinyinComposer : Composer {
         CjkLearning.adjust(NAMESPACE, cand.reading, cand.text, cand.source, adjustment)
     }
 
-    /**
-     * What usually follows [context] (#580 follow-up): the user's own habits
-     * first, then the word pairs' commonest followers of its last word, and
-     * the rest of a longer word it starts (无 → 聊, from 无聊). Looked up for
-     * every ending of [context] up to four characters, so 喜欢 and 欢 both get
-     * asked, and scored on one scale, `ln P(next | ending)`.
-     */
+    /** Follow-on words, well-supported short phrases, and word completions after a commit. */
     override fun predictions(context: String, limit: Int): List<String> {
-        if (!CjkConfig.pinyinPrediction) return emptyList()
+        if (!CjkConfig.pinyinPrediction || limit <= 0) return emptyList()
         val tail = CjkContext.hanTail(context)
         if (tail.isEmpty()) return emptyList()
         val ngrams = CjkDictionaries.pinyinNgrams
         val history = CjkLearning.store
         val blocked = CjkLearning.adjustFor(NAMESPACE)?.blocked.orEmpty()
         val scores = HashMap<String, Double>()
+        val phraseScores = HashMap<String, Double>()
+        var bestCorpusScore = Double.NEGATIVE_INFINITY
+        var wordContextLength = 0
         fun offer(word: String, score: Double) {
             if (word.isEmpty() || word in blocked) return
             if (score > (scores[word] ?: Double.NEGATIVE_INFINITY)) scores[word] = score
+            if (score <= 0.0) bestCorpusScore = maxOf(score, bestCorpusScore)
         }
         val points = tail.codePointCount(0, tail.length)
         for (len in minOf(PREDICT_CONTEXT, points) downTo 1) {
@@ -635,16 +594,56 @@ object PinyinComposer : Composer {
             history?.followersOf(NAMESPACE, ending)?.forEach { (word, n) -> offer(word, n.toDouble()) }
             val prior = ngrams.unigram(ending)
             if (prior <= 0) continue
-            for ((word, n) in ngrams.successors(ending)) offer(word, ln(n.toDouble() / prior))
-            for ((word, n) in ngrams.completions(ending, limit)) {
-                offer(word.substring(ending.length), ln(n.toDouble() / maxOf(prior, n)) + COMPLETION_COST)
+            val followers = ngrams.successors(ending, if (len > 1) WORD_FOLLOWER_POOL else SINGLE_CHAR_FOLLOWER_POOL)
+            if (len > 1 && wordContextLength == 0 && followers.isNotEmpty()) wordContextLength = len
+            val backoff = (wordContextLength - len).coerceAtLeast(0) * ln(0.24)
+            for ((index, follower) in followers.withIndex()) {
+                val (word, count) = follower
+                val frequency = ngrams.unigram(word)
+                val probability = count.toDouble() / maxOf(count, prior)
+                val commonness = predictionCommonness(frequency)
+                offer(word, ln(probability) + backoff - commonness)
+                // Only expand well-supported paths from the longest recognised context.
+                if (len != maxOf(wordContextLength, 1) || index >= PHRASE_FOLLOWERS ||
+                    frequency <= 0 || count < 4 || probability < 0.005 || word in blocked
+                ) continue
+                for ((next, occurrences) in ngrams.successors(word, PHRASE_FOLLOWERS)) {
+                    val nextProbability = occurrences.toDouble() / maxOf(occurrences, frequency)
+                    if (next == word || next in blocked || occurrences < 4 || nextProbability < 0.015) continue
+                    val phrase = word + next
+                    if (phrase.codePointCount(0, phrase.length) !in 3..6 || phrase in blocked ||
+                        CjkContext.hanTail(phrase) != phrase
+                    ) continue
+                    val shortTailPenalty = if (next.codePointCount(0, next.length) == 1) 1.35 else 0.0
+                    val score = ln(probability) + 0.6 * ln(nextProbability) - shortTailPenalty -
+                        0.35 * (commonness + predictionCommonness(ngrams.unigram(next)))
+                    if (score > (phraseScores[phrase] ?: Double.NEGATIVE_INFINITY)) phraseScores[phrase] = score
+                }
+            }
+            // The last character inside a recognised word is a poor basis for word completion.
+            if (len > 1 || wordContextLength == 0) {
+                val cost = if (wordContextLength == 0) COMPLETION_COST else ln(0.2)
+                for ((word, n) in ngrams.completions(ending, limit)) {
+                    offer(word.substring(ending.length), ln(n.toDouble() / maxOf(prior, n)) + cost + backoff)
+                }
             }
         }
-        return scores.entries.sortedByDescending { it.value }
-            .take(limit)
-            .map { HanVariant.traditionalForms(it.key).first() }
+        val byScore = compareByDescending<Map.Entry<String, Double>> { it.value }.thenBy { it.key }
+        val words = scores.entries.sortedWith(byScore).map { it.key }
+        val phrases = phraseScores.entries.sortedWith(byScore).asSequence()
+            .filter { (phrase, score) -> phrase !in scores && score >= bestCorpusScore - 4.0 }
+            .map { it.key }
+            .take(MAX_PREDICTED_PHRASES)
+        val leadingWords = minOf(2, words.size)
+        return (words.take(leadingWords).asSequence() + phrases + words.drop(leadingWords).asSequence())
+            .map { HanVariant.traditionalForms(it).first() }
+            .filterNot { it in blocked }
             .distinct()
+            .take(limit)
+            .toList()
     }
+
+    private fun predictionCommonness(frequency: Int): Double = 0.55 * ln1p(frequency / 10_000.0)
 
     override fun learnPrediction(context: String, picked: String) {
         val tail = CjkContext.hanTail(context)
